@@ -1,0 +1,18 @@
+# Godot generated files
+.godot/
+*.tmp
+*.tmp.*
+
+# Exported game builds
+rendered/
+*.exe
+*.pck
+*.app/
+
+# Local editor and operating-system files
+.vs/
+*.user
+.DS_Store
+Thumbs.db
+build/
+dist/
