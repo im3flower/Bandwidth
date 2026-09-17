@@ -11,6 +11,7 @@ rendered/
 
 # Local editor and operating-system files
 .vs/
+.vscode/
 *.user
 .DS_Store
 Thumbs.db
