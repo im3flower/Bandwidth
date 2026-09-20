@@ -32,7 +32,7 @@ const AI_BOUNCE_FIRE_CHANCE := 0.25
 const AI_BOUNCE_AIM_ERROR := 0.24
 const BEAT_OFFSET_STEP := 0.010
 const MAX_BEAT_OFFSET := 0.500
-const CAPTURE_RADIUS := 190.0
+const CAPTURE_RADIUS := 475.0
 const CAPTURE_HEAL_PER_SECOND := 5.0
 const CAPTURE_ACTIVATION_SECONDS := 0.65
 const CHAOS_DURATION_SECONDS := 8.0
@@ -114,6 +114,7 @@ var style_weights: Array[float] = [0.5, 0.5]
 var capture_owner := -1
 var capture_hold_time := 0.0
 var capture_contested := false
+var capture_heal_remainders: Dictionary = {}
 var pickups: Array[Dictionary] = []
 var player_melody_ammo: Dictionary = {}
 var player_chaos_until: Dictionary = {}
@@ -130,6 +131,8 @@ var calibration_result := "No calibration recorded"
 var calibration_audio_player: AudioStreamPlayer
 var calibration_audio_playback: AudioStreamGeneratorPlayback
 var calibration_audio_frames_written := 0
+var last_attack_feedback := ""
+var last_attack_feedback_until := 0.0
 @onready var beat_clock: BeatClock = $BeatClock
 
 func _ready() -> void:
@@ -183,6 +186,7 @@ func reset_music_gameplay_state() -> void:
 	capture_owner = -1
 	capture_hold_time = 0.0
 	capture_contested = false
+	capture_heal_remainders.clear()
 	pickups = [
 		{"kind": "melody", "position": ARENA_SIZE / 2.0 + Vector2(-310.0, 0.0), "active": true, "respawn_at": 0.0},
 		{"kind": "chaos", "position": ARENA_SIZE / 2.0 + Vector2(310.0, 0.0), "active": true, "respawn_at": 0.0},
@@ -734,10 +738,15 @@ func update_capture_zone(delta: float) -> void:
 			append_music_cue("capture_started", {"owner": capture_owner, "drum_density": 0.55})
 		if capture_hold_time >= CAPTURE_ACTIVATION_SECONDS and capture_owner < players.size():
 			var owner := players[capture_owner]
-			owner.health = mini(MAX_HEALTH, roundi(float(owner.health) + CAPTURE_HEAL_PER_SECOND * delta))
+			var carry := float(capture_heal_remainders.get(capture_owner, 0.0)) + CAPTURE_HEAL_PER_SECOND * delta
+			var whole_heal := floori(carry)
+			capture_heal_remainders[capture_owner] = carry - float(whole_heal)
+			if whole_heal > 0:
+				owner.health = mini(MAX_HEALTH, owner.health + whole_heal)
 	elif occupants.is_empty():
 		capture_owner = -1
 		capture_hold_time = 0.0
+		capture_heal_remainders.clear()
 
 func update_pickups() -> void:
 	for pickup in pickups:
@@ -1378,8 +1387,8 @@ func start_countdown_number() -> int:
 	return maxi(0, ceili(-elapsed))
 
 func timing_grade() -> Array:
-	var attack_phase := posmod(calibrated_beat_position() * 2.0, 1.0)
-	var distance := minf(attack_phase, 1.0 - attack_phase) * beat_clock.seconds_per_beat() * 0.5
+	var nearest_half_beat := roundi(calibrated_beat_position() * 2.0) * 0.5
+	var distance := absf(calibrated_beat_position() - nearest_half_beat) * beat_clock.seconds_per_beat()
 	if distance <= PERFECT_WINDOW:
 		return ["perfect", 22]
 	if distance <= GOOD_WINDOW:
@@ -1409,6 +1418,8 @@ func attack(player: ArenaPlayerState) -> void:
 	player.last_attack_time = elapsed
 	var fatigue_scale := 1.0 if player.fatigue < 7.0 else 0.55
 	var damage := maxi(1, roundi(base_damage * fatigue_scale))
+	last_attack_feedback = "%s  %d DMG" % [grade.to_upper(), damage]
+	last_attack_feedback_until = elapsed + 0.55
 	var speed: float
 	var radius: float
 	var brightness: float
@@ -1601,6 +1612,11 @@ func _draw() -> void:
 	draw_string(font, Vector2(760.0, 62.0), "STYLE  P1 %.0f%%  /  P2 %.0f%%" % [style_weights[0] * 100.0, style_weights[1] * 100.0], HORIZONTAL_ALIGNMENT_LEFT, -1, 24, TEXT)
 	var capture_label := "CENTER: contested" if capture_contested else ("CENTER: P%d healing" % (capture_owner + 1) if capture_owner >= 0 and capture_hold_time >= CAPTURE_ACTIVATION_SECONDS else "CENTER: neutral")
 	draw_string(font, Vector2(760.0, 88.0), "%s · BPM %.1f · temperature %.2f" % [capture_label, beat_clock.current_bpm(), music_temperature], HORIZONTAL_ALIGNMENT_LEFT, -1, 22, Color("bec3cf"))
+	if capture_owner >= 0 and not capture_contested and capture_hold_time >= CAPTURE_ACTIVATION_SECONDS:
+		draw_string(font, Vector2(0, 126), "CENTER CONTROL · P%d +%.0f HP/s" % [capture_owner + 1, CAPTURE_HEAL_PER_SECOND], HORIZONTAL_ALIGNMENT_CENTER, int(DISPLAY_SIZE.x), 24, Color("8ee6bc"))
+	if elapsed < last_attack_feedback_until:
+		var feedback_color := Color("72dbff") if last_attack_feedback.begins_with("PERFECT") else (Color("8ee6bc") if last_attack_feedback.begins_with("GOOD") else (Color("f7ae4f") if last_attack_feedback.begins_with("WEAK") else Color("f66060")))
+		draw_string(font, Vector2(0, 1170), last_attack_feedback, HORIZONTAL_ALIGNMENT_CENTER, int(DISPLAY_SIZE.x), 32, feedback_color)
 	for player in players:
 		var x := 60.0 + 480.0 * float(player.index)
 		draw_string(font, Vector2(x, 56), "P%d  %d / %d" % [player.index + 1, player.health, MAX_HEALTH], HORIZONTAL_ALIGNMENT_LEFT, -1, 36, TEXT)
