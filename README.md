@@ -12,6 +12,19 @@ The completed game is intended to use **Magenta Realtime** to generate reactive 
 
 See [`docs/architecture.md`](docs/architecture.md) for authority boundaries, the music synchronization contract, network messages, and the staged migration plan.
 
+## Gameplay-design branch systems
+
+This branch adds an authoritative gameplay-to-music cue layer while keeping Magenta RT external:
+
+- **Style contest:** the P1/P2 style bar smoothly follows relative health.
+- **Chord laser:** an on-beat charge emits a root-note cue; release emits a quality-scaled chord cue.
+- **Central control zone:** hold the central ring alone to receive gradual healing and a drum-density cue.
+- **Melody ammunition:** collect the purple note pickup, then make Good/Perfect shots to emit its three-note phrase.
+- **Chaos core:** collect the gold pickup for a temporary, bounded rise in generation temperature.
+- **Perfect resonance:** two players landing Perfect attacks in the same beat temporarily balance styles and emit a shared chord.
+
+`MusicPlan` now contains the host-authored cues and is replicated in LAN snapshots. The actual Magenta RT adapter, its API request format, authentication, audio generation, caching, and distribution are intentionally not implemented in Godot. See [`docs/magenta-rt-bridge.md`](docs/magenta-rt-bridge.md) for the exact cue-to-Magenta input mapping and prompt templates.
+
 ## LAN test (up to four game processes)
 
 The default AI count is `0`. A room supports one host and up to three remote players (four human players total). Godot may prevent opening the same project twice in the editor, so use exported builds or separate Godot processes for additional local clients. LAN snapshots run at 60 Hz, movement is predicted locally, and shot/dash/laser transitions use reliable action messages; the host remains authoritative for hits and damage. Each accepted lobby join resets the shared five-second countdown for every player. LAN AI is simulated by the host and included in the same snapshots; AI is capped at `4 - human players` and is replaced by a joining human before a match begins.

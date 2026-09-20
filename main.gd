@@ -43,6 +43,14 @@ const MIN_LAN_START_LEAD_SECONDS := 1.0
 const MAX_LAN_START_LEAD_SECONDS := 10.0
 const DELAY_REPEAT_DELAY := 0.500
 const DELAY_REPEAT_INTERVAL := 0.025
+const CAPTURE_RADIUS := 190.0
+const CAPTURE_HEAL_PER_SECOND := 5.0
+const CAPTURE_ACTIVATION_SECONDS := 0.65
+const CHAOS_DURATION_SECONDS := 8.0
+const CHAOS_TEMPERATURE_BONUS := 0.22
+const PICKUP_RESPAWN_SECONDS := 9.0
+const RESONANCE_DURATION_SECONDS := 2.5
+const RESONANCE_COOLDOWN_SECONDS := 4.0
 
 const BACKGROUND := Color("161921")
 const GRID := Color("272b37")
@@ -109,6 +117,18 @@ var last_ping_msec := 0
 var music_started := false
 var network_charge_states: Dictionary = {}
 var network_action_queues: Dictionary = {}
+var music_plan := MusicPlan.new()
+var style_weights: Array[float] = [0.5, 0.5]
+var capture_owner := -1
+var capture_hold_time := 0.0
+var capture_contested := false
+var pickups: Array[Dictionary] = []
+var player_melody_ammo: Dictionary = {}
+var player_chaos_until: Dictionary = {}
+var perfect_attack_beats: Dictionary = {}
+var resonance_until := 0.0
+var resonance_cooldown_until := 0.0
+var music_temperature := 0.70
 @onready var background_music: AudioStreamPlayer = $BackgroundMusic
 @onready var beat_clock: BeatClock = $BeatClock
 
@@ -147,6 +167,7 @@ func reset_game() -> void:
 	laser_points.clear()
 	projectiles.clear()
 	players.clear()
+	reset_music_gameplay_state()
 	var spawn_positions: Array[Vector2] = get_spawn_positions()
 	var player_spawn := spawn_positions[0]
 	players.append(ArenaPlayerState.new(0, player_spawn, Color("57b0ff"), (ARENA_SIZE / 2.0 - player_spawn).normalized()))
@@ -156,6 +177,23 @@ func reset_game() -> void:
 		var bot_spawn := spawn_positions[bot_index + 1]
 		players.append(ArenaPlayerState.new(bot_index + 1, bot_spawn, bot_colors[bot_index], (ARENA_SIZE / 2.0 - bot_spawn).normalized()))
 		initialize_ai_state()
+
+func reset_music_gameplay_state() -> void:
+	music_plan.configure("bandwidth-%d" % Time.get_ticks_msec(), BPM, Time.get_ticks_msec())
+	style_weights = [0.5, 0.5]
+	capture_owner = -1
+	capture_hold_time = 0.0
+	capture_contested = false
+	pickups = [
+		{"kind": "melody", "position": ARENA_SIZE / 2.0 + Vector2(-310.0, 0.0), "active": true, "respawn_at": 0.0},
+		{"kind": "chaos", "position": ARENA_SIZE / 2.0 + Vector2(310.0, 0.0), "active": true, "respawn_at": 0.0},
+	]
+	player_melody_ammo.clear()
+	player_chaos_until.clear()
+	perfect_attack_beats.clear()
+	resonance_until = 0.0
+	resonance_cooldown_until = 0.0
+	music_temperature = 0.70
 
 func get_spawn_positions() -> Array[Vector2]:
 	var margin := 260.0
@@ -206,6 +244,7 @@ func update_solo_game(delta: float) -> void:
 		for bot_index in range(1, players.size()):
 			update_ai(delta, bot_index)
 		update_projectiles(delta)
+		update_music_gameplay(delta)
 	if winner != -1 and background_music.playing:
 		background_music.stop()
 
@@ -228,6 +267,7 @@ func update_lan_game(delta: float) -> void:
 			elif owner_peer_id < 0:
 				update_ai(delta, player_index)
 		update_projectiles(delta)
+		update_music_gameplay(delta)
 	if winner != -1 and background_music.playing:
 		background_music.stop()
 	snapshot_elapsed += delta
@@ -583,6 +623,18 @@ func broadcast_snapshot(snapshot: Dictionary) -> void:
 	laser_brightness = float(snapshot.get("laser_brightness", 1.0))
 	player_owners = snapshot.get("owners", [])
 	network_charge_states = snapshot.get("charge_states", {})
+	style_weights = snapshot.get("style_weights", style_weights)
+	capture_owner = int(snapshot.get("capture_owner", -1))
+	capture_hold_time = float(snapshot.get("capture_hold_time", 0.0))
+	capture_contested = bool(snapshot.get("capture_contested", false))
+	pickups = snapshot.get("pickups", [])
+	player_melody_ammo = snapshot.get("player_melody_ammo", {})
+	player_chaos_until = snapshot.get("player_chaos_until", {})
+	resonance_until = float(snapshot.get("resonance_until", 0.0))
+	music_temperature = float(snapshot.get("music_temperature", 0.70))
+	var music_plan_payload: Dictionary = snapshot.get("music_plan", {})
+	if not music_plan_payload.is_empty():
+		music_plan = MusicPlan.from_payload(music_plan_payload)
 	players.clear()
 	for player_data in snapshot.get("players", []):
 		players.append(ArenaPlayerState.from_snapshot(player_data))
@@ -612,7 +664,125 @@ func make_snapshot() -> Dictionary:
 		"host_bot_count": bot_count,
 		"lan_start_lead_seconds": lan_start_lead_seconds,
 		"match_start_server_msec": match_start_server_msec,
+		"style_weights": style_weights,
+		"capture_owner": capture_owner,
+		"capture_hold_time": capture_hold_time,
+		"capture_contested": capture_contested,
+		"pickups": pickups,
+		"player_melody_ammo": player_melody_ammo,
+		"player_chaos_until": player_chaos_until,
+		"resonance_until": resonance_until,
+		"music_temperature": music_temperature,
+		"music_plan": music_plan.to_payload(),
 	}
+
+func can_author_music_cues() -> bool:
+	return not lan_mode or lan_is_host
+
+func append_music_cue(cue_type: String, details: Dictionary = {}) -> void:
+	if not can_author_music_cues():
+		return
+	var cue := details.duplicate(true)
+	cue["id"] = "%s-%d" % [cue_type, music_plan.revision + 1]
+	cue["type"] = cue_type
+	cue["start_beat"] = beat_time() / BEAT_SECONDS
+	cue["temperature"] = music_temperature
+	music_plan.append_cue(cue)
+
+func update_music_gameplay(delta: float) -> void:
+	update_capture_zone(delta)
+	update_pickups()
+	update_style_weights(delta)
+	update_chaos_temperature(delta)
+
+func update_capture_zone(delta: float) -> void:
+	var occupants: Array[int] = []
+	for player in players:
+		if player.health > 0 and player.position.distance_to(ARENA_SIZE / 2.0) <= CAPTURE_RADIUS:
+			occupants.append(player.index)
+	capture_contested = occupants.size() > 1
+	if occupants.size() == 1:
+		var candidate_owner := occupants[0]
+		if capture_owner == candidate_owner:
+			capture_hold_time += delta
+		else:
+			capture_owner = candidate_owner
+			capture_hold_time = 0.0
+			append_music_cue("capture_started", {"owner": capture_owner, "drum_density": 0.55})
+		if capture_hold_time >= CAPTURE_ACTIVATION_SECONDS and capture_owner < players.size():
+			var owner := players[capture_owner]
+			owner.health = mini(MAX_HEALTH, roundi(float(owner.health) + CAPTURE_HEAL_PER_SECOND * delta))
+	elif occupants.is_empty():
+		capture_owner = -1
+		capture_hold_time = 0.0
+
+func update_pickups() -> void:
+	for pickup in pickups:
+		if not bool(pickup.get("active", false)):
+			if elapsed >= float(pickup.get("respawn_at", 0.0)):
+				pickup["active"] = true
+				append_music_cue("pickup_spawned", {"pickup": str(pickup.get("kind", ""))})
+			continue
+		var pickup_position: Vector2 = pickup.get("position", Vector2.ZERO)
+		for player in players:
+			if player.health > 0 and player.position.distance_to(pickup_position) <= PLAYER_RADIUS + 28.0:
+				collect_pickup(player, pickup)
+				break
+
+func collect_pickup(player: ArenaPlayerState, pickup: Dictionary) -> void:
+	var kind := str(pickup.get("kind", ""))
+	pickup["active"] = false
+	pickup["respawn_at"] = elapsed + PICKUP_RESPAWN_SECONDS
+	if kind == "melody":
+		player_melody_ammo[player.index] = PackedInt32Array([60, 63, 67]) if player.index == 0 else PackedInt32Array([62, 65, 69])
+		append_music_cue("melody_loaded", {"player": player.index, "notes": player_melody_ammo[player.index]})
+	elif kind == "chaos":
+		player_chaos_until[player.index] = elapsed + CHAOS_DURATION_SECONDS
+		append_music_cue("chaos_started", {"player": player.index, "duration_beats": CHAOS_DURATION_SECONDS / BEAT_SECONDS})
+
+func update_style_weights(delta: float) -> void:
+	if players.size() < 2:
+		return
+	var p1_health := maxf(0.0, float(players[0].health))
+	var p2_health := maxf(0.0, float(players[1].health))
+	var total_health := p1_health + p2_health
+	var target_p1 := 0.5 if total_health <= 0.0 else p1_health / total_health
+	if elapsed < resonance_until:
+		target_p1 = 0.5
+	style_weights[0] = lerpf(style_weights[0], target_p1, clampf(delta * 2.2, 0.0, 1.0))
+	style_weights[1] = 1.0 - style_weights[0]
+
+func update_chaos_temperature(delta: float) -> void:
+	var target_temperature := 0.70
+	for player_index in player_chaos_until:
+		if elapsed < float(player_chaos_until[player_index]):
+			target_temperature += CHAOS_TEMPERATURE_BONUS
+	music_temperature = lerpf(music_temperature, clampf(target_temperature, 0.55, 0.95), clampf(delta * 2.0, 0.0, 1.0))
+
+func register_perfect_attack(player: ArenaPlayerState) -> void:
+	var current_beat := beat_number()
+	perfect_attack_beats[player.index] = current_beat
+	if elapsed < resonance_cooldown_until:
+		return
+	for other_player_index in perfect_attack_beats:
+		if int(other_player_index) != player.index and int(perfect_attack_beats[other_player_index]) == current_beat:
+			resonance_until = elapsed + RESONANCE_DURATION_SECONDS
+			resonance_cooldown_until = elapsed + RESONANCE_COOLDOWN_SECONDS
+			append_music_cue("resonance", {"players": [player.index, int(other_player_index)], "midi_notes": PackedInt32Array([60, 63, 67, 70]), "duration_beats": 2.0})
+			return
+
+func consume_melody_note(player: ArenaPlayerState) -> void:
+	if not player_melody_ammo.has(player.index):
+		return
+	var notes: PackedInt32Array = player_melody_ammo[player.index]
+	if notes.is_empty():
+		return
+	var note := notes[0]
+	notes.remove_at(0)
+	player_melody_ammo[player.index] = notes
+	append_music_cue("melody_note", {"player": player.index, "midi_notes": PackedInt32Array([note]), "velocity": 100, "duration_beats": 0.45})
+	if notes.is_empty():
+		append_music_cue("melody_phrase_complete", {"player": player.index, "midi_notes": PackedInt32Array([note + 7]), "duration_beats": 0.8})
 
 func update_network_player(delta: float, player_index: int, input: Dictionary) -> void:
 	var player := players[player_index]
@@ -637,10 +807,13 @@ func update_network_player(delta: float, player_index: int, input: Dictionary) -
 				charge_state["started_on_beat"] = is_within_laser_charge_window(LASER_CHARGE_START_WINDOW)
 				charge_state["started_at_msec"] = network_time_msec()
 				charge_state["release_beat"] = laser_charge_beat_number() + 1
+				if bool(charge_state["started_on_beat"]):
+					append_music_cue("laser_charge_root", {"player": player.index, "midi_notes": PackedInt32Array([48 + player.index * 2]), "velocity": 78, "duration_beats": 1.0})
 			"laser_released":
 				if bool(charge_state.get("started_on_beat", false)) and is_valid_network_laser_release(charge_state):
 					fire_laser(player, network_laser_timing_quality(charge_state))
 				else:
+					append_music_cue("laser_charge_cancelled", {"player": player.index})
 					attack(player)
 				charge_state.clear()
 			"laser_cancelled":
@@ -733,11 +906,15 @@ func _unhandled_input(event: InputEvent) -> void:
 			charging_laser = charge_started_on_beat
 			charge_started_at = elapsed
 			charge_release_beat = laser_charge_beat_number() + 1
+			if charge_started_on_beat:
+				append_music_cue("laser_charge_root", {"player": 0, "midi_notes": PackedInt32Array([48]), "velocity": 78, "duration_beats": 1.0})
 		else:
 			charging_laser = false
 			if charge_started_on_beat and is_valid_laser_release():
 				fire_laser(players[0], laser_timing_quality())
 			else:
+				if charge_started_on_beat:
+					append_music_cue("laser_charge_cancelled", {"player": 0})
 				attack(players[0])
 			charge_started_on_beat = false
 			charge_release_beat = -1
@@ -1172,6 +1349,10 @@ func attack(player: ArenaPlayerState) -> void:
 	player.apply_slow(0.10, BEAT_SECONDS)
 	var color := player.tint.darkened(1.0 - brightness)
 	projectiles.append(ArenaProjectileState.new(player.position + player.facing * (44.0 + radius), player.facing * speed, player.index, damage, radius, color))
+	if grade == "perfect":
+		register_perfect_attack(player)
+	if grade == "perfect" or grade == "good":
+		consume_melody_note(player)
 	if player.fatigue >= 10.0:
 		player.overheat = 1.0
 		player.fatigue = 6.0
@@ -1185,6 +1366,11 @@ func fire_laser(player: ArenaPlayerState, timing_quality: float = 0.72) -> void:
 	laser_damage = roundi(4.0 + 36.0 * timing_quality)
 	laser_width = 10.0 + 12.0 * timing_quality
 	laser_brightness = 0.40 + 0.60 * timing_quality
+	var root_note := 48 + player.index * 2
+	var chord_notes := PackedInt32Array([root_note, root_note + 3, root_note + 7])
+	if timing_quality >= 0.92:
+		chord_notes.append(root_note + 10)
+	append_music_cue("laser_chord", {"player": player.index, "midi_notes": chord_notes, "velocity": roundi(70.0 + timing_quality * 55.0), "duration_beats": 1.25, "quality": timing_quality})
 	player.attack_cooldown = 0.45
 	player.fatigue = maxf(0.0, player.fatigue - 1.5)
 	for target in players:
@@ -1248,6 +1434,20 @@ func _draw() -> void:
 	for wall in walls:
 		draw_rect(wall, Color("596171"), true)
 		draw_rect(wall, Color("9ca5b5"), false, 4.0)
+	var capture_color := Color("4b5366") if capture_owner < 0 or capture_owner >= players.size() else players[capture_owner].tint
+	if capture_contested:
+		capture_color = Color("f7ae4f")
+	draw_circle(ARENA_SIZE / 2.0, CAPTURE_RADIUS, Color(capture_color, 0.12))
+	draw_arc(ARENA_SIZE / 2.0, CAPTURE_RADIUS, 0.0, TAU, 48, Color(capture_color, 0.85), 5.0)
+	for pickup in pickups:
+		if not bool(pickup.get("active", false)):
+			continue
+		var pickup_position: Vector2 = pickup.get("position", Vector2.ZERO)
+		var pickup_kind := str(pickup.get("kind", ""))
+		var pickup_color := Color("d58cff") if pickup_kind == "melody" else Color("f7ae4f")
+		draw_circle(pickup_position, 27.0, Color(pickup_color, 0.20))
+		draw_circle(pickup_position, 17.0, pickup_color)
+		draw_string(font, pickup_position + Vector2(-20.0, 8.0), "♪" if pickup_kind == "melody" else "?", HORIZONTAL_ALIGNMENT_CENTER, 40, 28, BACKGROUND)
 	for player in players:
 		if player.health <= 0:
 			var corpse_color := player.tint.darkened(0.78)
@@ -1315,6 +1515,13 @@ func _draw() -> void:
 		if player.overheat > 0.0:
 			draw_string(font, player.position + Vector2(-76, -84), "OVERHEAT", HORIZONTAL_ALIGNMENT_LEFT, -1, 28, Color("f66060"))
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+	var style_bar := Rect2(650.0, 18.0, 700.0, 22.0)
+	draw_rect(style_bar, Color("ff7882"), true)
+	draw_rect(Rect2(style_bar.position, Vector2(style_bar.size.x * style_weights[0], style_bar.size.y)), Color("57b0ff"), true)
+	draw_rect(style_bar, TEXT, false, 2.0)
+	draw_string(font, Vector2(760.0, 62.0), "STYLE  P1 %.0f%%  /  P2 %.0f%%" % [style_weights[0] * 100.0, style_weights[1] * 100.0], HORIZONTAL_ALIGNMENT_LEFT, -1, 24, TEXT)
+	var capture_label := "CENTER: contested" if capture_contested else ("CENTER: P%d healing" % (capture_owner + 1) if capture_owner >= 0 and capture_hold_time >= CAPTURE_ACTIVATION_SECONDS else "CENTER: neutral")
+	draw_string(font, Vector2(760.0, 88.0), "%s · temperature %.2f" % [capture_label, music_temperature], HORIZONTAL_ALIGNMENT_LEFT, -1, 22, Color("bec3cf"))
 	for player in players:
 		var x := 60.0 + 480.0 * float(player.index)
 		draw_string(font, Vector2(x, 56), "P%d  %d / %d" % [player.index + 1, player.health, MAX_HEALTH], HORIZONTAL_ALIGNMENT_LEFT, -1, 36, TEXT)
