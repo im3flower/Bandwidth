@@ -1,15 +1,10 @@
 [gd_scene format=3 uid="uid://cr78anam7qq2o"]
 
 [ext_resource type="Script" uid="uid://dsxyd0k3i4f3f" path="res://main.gd" id="1_main"]
-[ext_resource type="AudioStream" uid="uid://jj0dc6bob7c2" path="res://assets/overflow_mastering.wav" id="2_bgm"]
 [ext_resource type="Script" uid="uid://dx0gelxaq04hc" path="res://scripts/core/beat_clock.gd" id="3_beat_clock"]
 
 [node name="RhythmArena" type="Node2D" unique_id=703077810]
 script = ExtResource("1_main")
-
-[node name="BackgroundMusic" type="AudioStreamPlayer" parent="." unique_id=1817282302]
-stream = ExtResource("2_bgm")
-volume_db = -10.0
 
 [node name="BeatClock" type="Node" parent="." unique_id=1691601115]
 script = ExtResource("3_beat_clock")

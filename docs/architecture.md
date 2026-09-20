@@ -25,7 +25,7 @@ Evolve the Godot 4 prototype into a LAN multiplayer rhythm arena game where the 
 
 ## Music synchronization contract
 
-The host creates a match with a `start_time_msec` sufficiently in the future (currently 5 seconds). It broadcasts one `MusicPlan` containing the BPM, seed/session ID, start time, and cues whose start points are expressed in beats. The fallback WAV starts from offset zero at beat 64; combat remains independent and begins at the match timestamp.
+The host creates a match with a `start_time_msec` sufficiently in the future (currently 5 seconds). It broadcasts one `MusicPlan` containing the starting BPM, seed/session ID, start time, and cues whose start points are expressed in beats. `BeatClock` also serializes a tempo-segment schedule: changes are bar-quantized, at least 16 beats apart, limited to 2 BPM each, and clamped to 120–136 BPM. Combat remains independent and begins at the match timestamp.
 
 A cue should contain only stable data such as:
 
@@ -51,7 +51,7 @@ The generator must render ahead of playback. Late generated audio is scheduled o
 3. Extract a headless-safe `GameSimulation` that owns combat, AI, players, projectiles, and match state. Keep its clock as an injected dependency.
 4. Move ENet lifecycle and RPC handlers into a scene child named `LanSession`; host and clients must use the same node path for Godot high-level RPCs.
 5. Add client interpolation and per-player input ownership.
-6. Add `MusicDirector` using the existing WAV as a fallback implementation of `MusicPlan`.
+6. Add `MusicDirector` consuming `MusicPlan`, its tempo segments, and a generated-audio stream.
 7. Build a Magenta service adapter, specify stream/cached-segment delivery, and add host-only generation requests.
 8. Export a headless server after host mode is stable.
 

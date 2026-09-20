@@ -6,7 +6,7 @@ Open `project.godot` in Godot 4 and run the project.
 
 ## Architecture direction
 
-The current WAV is a local development fallback. Gameplay timing now uses a monotonic `BeatClock`, not the audio playback position, so it can be synchronized to a LAN host or headless server.
+The project has no fallback WAV. Gameplay timing uses a monotonic, host-synchronized `BeatClock`, not audio playback position, so Magenta RT can replace the soundtrack without changing combat timing.
 
 The completed game is intended to use **Magenta Realtime** to generate reactive music from player actions. The host/server will own the match clock and the generated `MusicPlan`; every client will schedule the same generated segments or cues on that shared timeline. Local device latency may change presentation but never changes combat timing judgement.
 
@@ -24,6 +24,8 @@ This branch adds an authoritative gameplay-to-music cue layer while keeping Mage
 - **Perfect resonance:** two players landing Perfect attacks in the same beat temporarily balance styles and emit a shared chord.
 
 `MusicPlan` now contains the host-authored cues and is replicated in LAN snapshots. The actual Magenta RT adapter, its API request format, authentication, audio generation, caching, and distribution are intentionally not implemented in Godot. See [`docs/magenta-rt-bridge.md`](docs/magenta-rt-bridge.md) for the exact cue-to-Magenta input mapping and prompt templates.
+
+The host uses a bounded tempo director: it evaluates match tension once every 16 beats, schedules only at a future bar boundary, and changes at most 2 BPM per step within 120–136 BPM. This keeps the current BPM readable for players while still giving Magenta a controlled long-form energy signal. `Esc` → **Music latency calibration** plays a built-in 120 BPM click track; after four count-in clicks, tap twelve beats with `F`, `Enter`, `Space`, or left click. The game robustly averages the signed timing error and stores the result as local presentation latency, so negative offsets are valid.
 
 ## LAN test (up to four game processes)
 
@@ -48,4 +50,4 @@ For two to four computers on the same network, replace `LAN_JOIN_ADDRESS` in eac
 - `[` / `]`: move beat timing 10 ms earlier/later
 - `\`: reset beat timing buffer
 
-At 130 BPM, attacks closest to the beat are faster and stronger. Attacks far from the beat remain possible but are weak. Repeated off-beat inputs add fatigue; max fatigue causes one second of overheat. A normal shot slows movement by 10%; charging the 30-damage laser slows it by 20%. Both recover smoothly over one beat after the action. While charging, laser aim turns toward the mouse at a limited speed. Lasers travel until their fourth wall or arena-boundary contact, then disappear. The AI uses wall-aware waypoints and slow, periodically updated auto-aim with small random error; without direct sight, it scans for a two-bounce wall shot that can reach the player. The BGM begins at beat 64 and stops when a round ends; `R` schedules the next round. Use the beat buffer controls while listening to the BGM to align the centre pulse with its first downbeat.
+The match starts at 128 BPM and the current BPM appears in the top HUD. Attacks closest to the beat are faster and stronger; off-beat attacks remain possible but weak. Repeated off-beat inputs add fatigue; max fatigue causes one second of overheat. A normal shot slows movement by 10%; charging the 30-damage laser slows it by 20%. Both recover smoothly over one beat after the action. While charging, laser aim turns toward the mouse at a limited speed. Lasers travel until their fourth wall or arena-boundary contact, then disappear. The AI uses wall-aware waypoints and slow, periodically updated auto-aim with small random error; without direct sight, it scans for a two-bounce wall shot that can reach the player. Bottom control hints disappear when the countdown finishes and return after the round. Use the calibration tool first; `[` / `]` remain available for 10 ms manual refinements and `\` resets the local offset.

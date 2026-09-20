@@ -3,15 +3,11 @@ extends Node2D
 const DISPLAY_SIZE := Vector2(2000, 1360)
 const WORLD_RENDER_SCALE := 0.70
 const ARENA_SIZE := ArenaRules.ARENA_SIZE
-const BPM := 130.0
-const BEAT_SECONDS := 60.0 / BPM
-const SONG_START_BEAT := 64
-const SONG_START_TIME := 0.0
+const BPM := 128.0
 const LAN_JOIN_ADDRESS := "192.168.1.158" # Replace with the host's LAN IPv4 address for a second computer.
 const DEFAULT_LAN_START_LEAD_SECONDS := 5.0
 const SOLO_START_LEAD_SECONDS := 5.0
 const MAX_ENTITIES := 4
-const ATTACK_BEAT_SECONDS := BEAT_SECONDS * 0.5
 const PERFECT_WINDOW := 0.018
 const GOOD_WINDOW := 0.045
 const WEAK_WINDOW := 0.080
@@ -24,7 +20,6 @@ const MAX_HEALTH := ArenaRules.MAX_HEALTH
 const PLAYER_RADIUS := ArenaRules.PLAYER_RADIUS
 const SPEED_MULTIPLIER := ArenaRules.SPEED_MULTIPLIER
 const MAX_MOVEMENT_STEP := ArenaRules.MAX_MOVEMENT_STEP
-const LASER_CHARGE_TIME := BEAT_SECONDS
 const LASER_DAMAGE := 30
 const LASER_AIM_TURN_SPEED := 2.4
 const AI_AIM_TURN_SPEED := 1.55
@@ -37,12 +32,6 @@ const AI_BOUNCE_FIRE_CHANCE := 0.25
 const AI_BOUNCE_AIM_ERROR := 0.24
 const BEAT_OFFSET_STEP := 0.010
 const MAX_BEAT_OFFSET := 0.500
-const DELAY_STEP := 0.001
-const LAN_DELAY_STEP := 0.5
-const MIN_LAN_START_LEAD_SECONDS := 1.0
-const MAX_LAN_START_LEAD_SECONDS := 10.0
-const DELAY_REPEAT_DELAY := 0.500
-const DELAY_REPEAT_INTERVAL := 0.025
 const CAPTURE_RADIUS := 190.0
 const CAPTURE_HEAL_PER_SECOND := 5.0
 const CAPTURE_ACTIVATION_SECONDS := 0.65
@@ -51,6 +40,14 @@ const CHAOS_TEMPERATURE_BONUS := 0.22
 const PICKUP_RESPAWN_SECONDS := 9.0
 const RESONANCE_DURATION_SECONDS := 2.5
 const RESONANCE_COOLDOWN_SECONDS := 4.0
+const TEMPO_EVALUATION_BEATS := 16
+const CALIBRATION_BPM := 120.0
+const CALIBRATION_BEAT_SECONDS := 60.0 / CALIBRATION_BPM
+const CALIBRATION_COUNT_IN_BEATS := 4
+const CALIBRATION_REQUIRED_TAPS := 12
+const CALIBRATION_MAX_ERROR_SECONDS := 0.220
+const CALIBRATION_MIN_VALID_TAPS := 7
+const CALIBRATION_AUDIO_LEAD_SECONDS := 1.0
 
 const BACKGROUND := Color("161921")
 const GRID := Color("272b37")
@@ -66,7 +63,6 @@ var beat_offset_seconds := 0.0
 var winner := -1
 var font: Font
 var bot_count := 0
-var song_start_delay := SOLO_START_LEAD_SECONDS
 var lan_start_lead_seconds := DEFAULT_LAN_START_LEAD_SECONDS
 var movement_keys: Array[Key] = [KEY_W, KEY_S, KEY_A, KEY_D]
 var movement_secondary_keys: Array[Key] = [KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT]
@@ -77,9 +73,6 @@ var dash_secondary_key: Key = KEY_SHIFT
 var settings_open := false
 var settings_selection := 0
 var waiting_for_keybind := false
-var delay_adjust_direction := 0
-var delay_adjust_hold_time := 0.0
-var delay_adjust_repeat_time := 0.0
 var ai_last_attack_beats: Array[int] = []
 var ai_scheduled_shot_times: Array[float] = []
 var ai_scheduled_lasers: Array[bool] = []
@@ -114,7 +107,6 @@ var match_start_server_msec := 0
 var server_clock_offset_msec := 0.0
 var pending_time_pings: Dictionary = {}
 var last_ping_msec := 0
-var music_started := false
 var network_charge_states: Dictionary = {}
 var network_action_queues: Dictionary = {}
 var music_plan := MusicPlan.new()
@@ -129,7 +121,15 @@ var perfect_attack_beats: Dictionary = {}
 var resonance_until := 0.0
 var resonance_cooldown_until := 0.0
 var music_temperature := 0.70
-@onready var background_music: AudioStreamPlayer = $BackgroundMusic
+var last_tempo_evaluation := -1
+var calibration_active := false
+var calibration_start_msec := 0
+var calibration_taps: Array[float] = []
+var calibration_last_beat := -1
+var calibration_result := "No calibration recorded"
+var calibration_audio_player: AudioStreamPlayer
+var calibration_audio_playback: AudioStreamGeneratorPlayback
+var calibration_audio_frames_written := 0
 @onready var beat_clock: BeatClock = $BeatClock
 
 func _ready() -> void:
@@ -139,14 +139,13 @@ func _ready() -> void:
 	multiplayer.connected_to_server.connect(_on_connected_to_server)
 	multiplayer.connection_failed.connect(_on_connection_failed)
 	multiplayer.server_disconnected.connect(_on_server_disconnected)
+	setup_calibration_audio()
 	reset_game()
 	queue_redraw()
 
 func reset_game() -> void:
-	background_music.stop()
-	elapsed = -song_start_delay
-	beat_clock.restart_after(song_start_delay, BPM)
-	music_started = false
+	elapsed = -SOLO_START_LEAD_SECONDS
+	beat_clock.restart_after(SOLO_START_LEAD_SECONDS, BPM)
 	winner = -1
 	ai_last_attack_beats.clear()
 	ai_scheduled_shot_times.clear()
@@ -179,7 +178,7 @@ func reset_game() -> void:
 		initialize_ai_state()
 
 func reset_music_gameplay_state() -> void:
-	music_plan.configure("bandwidth-%d" % Time.get_ticks_msec(), BPM, Time.get_ticks_msec())
+	music_plan.configure("bandwidth-%d" % Time.get_ticks_msec(), BPM, beat_clock.server_start_time_msec())
 	style_weights = [0.5, 0.5]
 	capture_owner = -1
 	capture_hold_time = 0.0
@@ -194,6 +193,7 @@ func reset_music_gameplay_state() -> void:
 	resonance_until = 0.0
 	resonance_cooldown_until = 0.0
 	music_temperature = 0.70
+	last_tempo_evaluation = -1
 
 func get_spawn_positions() -> Array[Vector2]:
 	var margin := 260.0
@@ -216,7 +216,8 @@ func initialize_ai_state() -> void:
 	ai_aim_errors.append(0.0)
 
 func _process(delta: float) -> void:
-	update_delay_adjustment(delta)
+	if calibration_active:
+		feed_calibration_audio()
 	elapsed += delta
 	if lan_mode:
 		update_lan_game(delta)
@@ -225,13 +226,12 @@ func _process(delta: float) -> void:
 	queue_redraw()
 
 func update_solo_game(delta: float) -> void:
-	update_music_playback()
 	laser_flash_time = maxf(0.0, laser_flash_time - delta)
-	if winner == -1 and elapsed >= 0.0 and not settings_open:
+	if winner == -1 and elapsed >= 0.0 and not settings_open and not calibration_active:
 		if players[0].health > 0:
 			var player_direction := get_direction()
 			if charging_laser:
-				players[0].apply_slow(0.20, BEAT_SECONDS)
+				players[0].apply_slow(0.20, beat_clock.seconds_per_beat())
 			var mouse_direction := get_global_mouse_position() / WORLD_RENDER_SCALE - players[0].position
 			if mouse_direction.length_squared() > 0.0:
 				var mouse_facing := mouse_direction.normalized()
@@ -245,8 +245,6 @@ func update_solo_game(delta: float) -> void:
 			update_ai(delta, bot_index)
 		update_projectiles(delta)
 		update_music_gameplay(delta)
-	if winner != -1 and background_music.playing:
-		background_music.stop()
 
 func update_lan_game(delta: float) -> void:
 	if not lan_is_host:
@@ -256,7 +254,6 @@ func update_lan_game(delta: float) -> void:
 		return
 	if Time.get_ticks_msec() < match_start_server_msec:
 		return
-	update_music_playback()
 	laser_flash_time = maxf(0.0, laser_flash_time - delta)
 	peer_inputs[1] = build_local_input()
 	if winner == -1 and is_match_combat_active():
@@ -268,8 +265,6 @@ func update_lan_game(delta: float) -> void:
 				update_ai(delta, player_index)
 		update_projectiles(delta)
 		update_music_gameplay(delta)
-	if winner != -1 and background_music.playing:
-		background_music.stop()
 	snapshot_elapsed += delta
 	if snapshot_elapsed >= 1.0 / float(NetworkProtocol.SNAPSHOT_RATE_HZ):
 		snapshot_elapsed = 0.0
@@ -280,15 +275,15 @@ func is_match_combat_active() -> bool:
 		if lan_is_host:
 			return match_start_server_msec != 0 and Time.get_ticks_msec() >= match_start_server_msec
 		return match_start_server_msec != 0 and Time.get_ticks_msec() >= server_to_local_msec(match_start_server_msec)
-	return beat_clock.beat_position() >= float(SONG_START_BEAT)
+	return elapsed >= 0.0
 
-func should_start_music() -> bool:
-	return winner == -1 and beat_clock.beat_position() >= float(SONG_START_BEAT)
-
-func update_music_playback() -> void:
-	if not music_started and should_start_music():
-		background_music.play(SONG_START_TIME)
-		music_started = true
+func is_combat_started() -> bool:
+	if lan_mode:
+		if match_start_server_msec == 0:
+			return false
+		var local_start_msec := match_start_server_msec if lan_is_host else server_to_local_msec(match_start_server_msec)
+		return Time.get_ticks_msec() >= local_start_msec
+	return elapsed >= 0.0
 
 func host_lan_game() -> void:
 	var peer := ENetMultiplayerPeer.new()
@@ -347,7 +342,6 @@ func setup_lan_match(human_owners: Array[int] = [1]) -> void:
 			peer_inputs[peer_id] = {}
 			network_action_queues[peer_id] = []
 	match_start_server_msec = 0
-	music_started = false
 
 func create_lan_player(player_index: int, spawn_positions: Array[Vector2]) -> ArenaPlayerState:
 	var player_colors: Array[Color] = [Color("57b0ff"), Color("ff7882"), Color("f7ae4f"), Color("b78cff")]
@@ -404,7 +398,7 @@ func get_lan_player_color(player_index: int) -> Color:
 func start_lan_match() -> void:
 	match_start_server_msec = Time.get_ticks_msec() + roundi(lan_start_lead_seconds * 1000.0)
 	beat_clock.configure(match_start_server_msec, BPM)
-	music_started = false
+	music_plan.configure("bandwidth-%d" % Time.get_ticks_msec(), BPM, match_start_server_msec)
 	lan_status = "Match starts in %.1f seconds — %d/%d players" % [lan_start_lead_seconds, get_human_player_count(), MAX_ENTITIES]
 	for peer_id in player_owners:
 		if peer_id > 1:
@@ -473,7 +467,6 @@ func update_client_clock_sync() -> void:
 		last_ping_msec = now
 		pending_time_pings[now] = now
 		time_ping.rpc_id(1, now)
-	update_music_playback()
 	if match_start_server_msec != 0:
 		var input := build_local_input()
 		predict_local_player(input, get_process_delta_time())
@@ -521,7 +514,7 @@ func build_local_input() -> Dictionary:
 		if local_slot >= 0:
 			facing = get_global_mouse_position() / WORLD_RENDER_SCALE - players[local_slot].position
 	input_sequence += 1
-	var controls_enabled := not settings_open
+	var controls_enabled := not settings_open and not calibration_active
 	var input := NetworkProtocol.make_input(input_sequence, get_direction() if controls_enabled else Vector2.ZERO, facing, {
 		"shot_pressed": queued_shot if controls_enabled else false,
 		"dash_pressed": queued_dash if controls_enabled else false,
@@ -570,8 +563,6 @@ func time_pong(client_send_msec: int, server_now_msec: int) -> void:
 
 @rpc("authority", "reliable")
 func match_config(server_start_msec: int, bpm: float, owners: Array[int], local_player_slot: int, host_bot_count: int, host_start_lead_seconds: float) -> void:
-	background_music.stop()
-	music_started = false
 	match_start_server_msec = server_start_msec
 	player_owners = owners.duplicate()
 	bot_count = host_bot_count
@@ -632,6 +623,9 @@ func broadcast_snapshot(snapshot: Dictionary) -> void:
 	player_chaos_until = snapshot.get("player_chaos_until", {})
 	resonance_until = float(snapshot.get("resonance_until", 0.0))
 	music_temperature = float(snapshot.get("music_temperature", 0.70))
+	var tempo_segments: Array[Dictionary] = snapshot.get("tempo_segments", [])
+	if not tempo_segments.is_empty():
+		beat_clock.set_tempo_segments(tempo_segments)
 	var music_plan_payload: Dictionary = snapshot.get("music_plan", {})
 	if not music_plan_payload.is_empty():
 		music_plan = MusicPlan.from_payload(music_plan_payload)
@@ -673,6 +667,7 @@ func make_snapshot() -> Dictionary:
 		"player_chaos_until": player_chaos_until,
 		"resonance_until": resonance_until,
 		"music_temperature": music_temperature,
+		"tempo_segments": beat_clock.tempo_segments(),
 		"music_plan": music_plan.to_payload(),
 	}
 
@@ -685,8 +680,11 @@ func append_music_cue(cue_type: String, details: Dictionary = {}) -> void:
 	var cue := details.duplicate(true)
 	cue["id"] = "%s-%d" % [cue_type, music_plan.revision + 1]
 	cue["type"] = cue_type
-	cue["start_beat"] = beat_time() / BEAT_SECONDS
+	if not cue.has("start_beat"):
+		cue["start_beat"] = calibrated_beat_position()
+	cue["tempo_bpm"] = beat_clock.current_bpm()
 	cue["temperature"] = music_temperature
+	music_plan.bpm = beat_clock.current_bpm()
 	music_plan.append_cue(cue)
 
 func update_music_gameplay(delta: float) -> void:
@@ -694,6 +692,31 @@ func update_music_gameplay(delta: float) -> void:
 	update_pickups()
 	update_style_weights(delta)
 	update_chaos_temperature(delta)
+	update_tempo_director()
+
+func update_tempo_director() -> void:
+	if not can_author_music_cues():
+		return
+	var phrase_index := floori(calibrated_beat_position() / float(TEMPO_EVALUATION_BEATS))
+	if phrase_index == last_tempo_evaluation:
+		return
+	last_tempo_evaluation = phrase_index
+	var health_fraction := 1.0
+	if not players.is_empty():
+		var total_health := 0.0
+		for player in players:
+			total_health += float(player.health) / float(MAX_HEALTH)
+		health_fraction = total_health / float(players.size())
+	var target_bpm := BPM + (1.0 - health_fraction) * 5.0
+	if capture_owner >= 0:
+		target_bpm += 1.0
+	if capture_contested:
+		target_bpm += 1.0
+	if music_temperature > 0.80:
+		target_bpm += 1.0
+	var tempo_segment := beat_clock.schedule_bpm_toward(target_bpm)
+	if not tempo_segment.is_empty():
+		append_music_cue("tempo_change", {"start_beat": float(tempo_segment["start_beat"]), "tempo_bpm": float(tempo_segment["bpm"]), "reason": "match_tension"})
 
 func update_capture_zone(delta: float) -> void:
 	var occupants: Array[int] = []
@@ -738,7 +761,7 @@ func collect_pickup(player: ArenaPlayerState, pickup: Dictionary) -> void:
 		append_music_cue("melody_loaded", {"player": player.index, "notes": player_melody_ammo[player.index]})
 	elif kind == "chaos":
 		player_chaos_until[player.index] = elapsed + CHAOS_DURATION_SECONDS
-		append_music_cue("chaos_started", {"player": player.index, "duration_beats": CHAOS_DURATION_SECONDS / BEAT_SECONDS})
+		append_music_cue("chaos_started", {"player": player.index, "duration_beats": CHAOS_DURATION_SECONDS / beat_clock.seconds_per_beat()})
 
 func update_style_weights(delta: float) -> void:
 	if players.size() < 2:
@@ -795,7 +818,7 @@ func update_network_player(delta: float, player_index: int, input: Dictionary) -
 	if facing.length_squared() > 0.0:
 		player.facing = facing.normalized()
 	if bool(input.get("laser_held", false)):
-		player.apply_slow(0.20, BEAT_SECONDS)
+		player.apply_slow(0.20, beat_clock.seconds_per_beat())
 	player.tick(delta, direction.limit_length(1.0), geometry)
 	for action in consume_network_actions(owner_peer_id):
 		match action:
@@ -821,33 +844,14 @@ func update_network_player(delta: float, player_index: int, input: Dictionary) -
 	network_charge_states[owner_peer_id] = charge_state
 
 func is_valid_network_laser_release(input: Dictionary) -> bool:
-	var target_time := float(input.get("release_beat", -1)) * BEAT_SECONDS
-	var release_offset := beat_time() - target_time
+	var release_offset := (calibrated_beat_position() - float(input.get("release_beat", -1))) * beat_clock.seconds_per_beat()
 	var held_seconds := float(network_time_msec() - int(input.get("started_at_msec", network_time_msec()))) / 1000.0
 	return held_seconds >= LASER_MIN_HOLD_TIME and release_offset >= -LASER_RELEASE_EARLY_WINDOW and release_offset <= LASER_RELEASE_LATE_WINDOW
 
 func network_laser_timing_quality(input: Dictionary) -> float:
-	var release_offset := beat_time() - float(input.get("release_beat", -1)) * BEAT_SECONDS
+	var release_offset := (calibrated_beat_position() - float(input.get("release_beat", -1))) * beat_clock.seconds_per_beat()
 	var tolerance := LASER_RELEASE_EARLY_WINDOW if release_offset < 0.0 else LASER_RELEASE_LATE_WINDOW
 	return clampf(1.0 - absf(release_offset) / tolerance, 0.0, 1.0)
-
-func update_delay_adjustment(delta: float) -> void:
-	if delay_adjust_direction == 0:
-		return
-	if not settings_open or settings_selection != 12:
-		delay_adjust_direction = 0
-		return
-	delay_adjust_hold_time += delta
-	if delay_adjust_hold_time < DELAY_REPEAT_DELAY:
-		return
-	delay_adjust_repeat_time += delta
-	while delay_adjust_repeat_time >= DELAY_REPEAT_INTERVAL:
-		adjust_song_start_delay(delay_adjust_direction)
-		delay_adjust_repeat_time -= DELAY_REPEAT_INTERVAL
-
-func adjust_song_start_delay(direction: int) -> void:
-	song_start_delay = clampf(song_start_delay + float(direction) * DELAY_STEP, 0.0, 3.0)
-	reset_game()
 
 func get_direction() -> Vector2:
 	var moving_left := Input.is_key_pressed(movement_keys[2]) or Input.is_key_pressed(movement_secondary_keys[2])
@@ -860,32 +864,136 @@ func get_direction() -> Vector2:
 	).limit_length(1.0)
 
 func beat_time() -> float:
-	return beat_clock.rhythm_time_seconds() - beat_offset_seconds
+	return calibrated_beat_position() * beat_clock.seconds_per_beat()
+
+func calibrated_beat_position() -> float:
+	return beat_clock.beat_position() - beat_offset_seconds / beat_clock.seconds_per_beat()
 
 func beat_number() -> int:
-	return roundi(beat_time() / ATTACK_BEAT_SECONDS)
+	return roundi(calibrated_beat_position() * 2.0)
 
 func laser_charge_beat_number() -> int:
-	return roundi(beat_time() / BEAT_SECONDS)
+	return roundi(calibrated_beat_position())
 
 func is_within_laser_charge_window(window: float) -> bool:
-	var phase := posmod(beat_time(), BEAT_SECONDS)
-	var distance := minf(phase, BEAT_SECONDS - phase)
+	var beat_phase := posmod(calibrated_beat_position(), 1.0)
+	var distance := minf(beat_phase, 1.0 - beat_phase) * beat_clock.seconds_per_beat()
 	return distance <= window
 
 func is_valid_laser_release() -> bool:
-	var target_beat_time: float = float(charge_release_beat) * BEAT_SECONDS
-	var release_offset: float = beat_time() - target_beat_time
+	var release_offset := (calibrated_beat_position() - float(charge_release_beat)) * beat_clock.seconds_per_beat()
 	var held_long_enough := elapsed - charge_started_at >= LASER_MIN_HOLD_TIME
 	return held_long_enough and release_offset >= -LASER_RELEASE_EARLY_WINDOW and release_offset <= LASER_RELEASE_LATE_WINDOW
 
 func laser_timing_quality() -> float:
-	var target_beat_time: float = float(charge_release_beat) * BEAT_SECONDS
-	var release_offset: float = beat_time() - target_beat_time
+	var release_offset := (calibrated_beat_position() - float(charge_release_beat)) * beat_clock.seconds_per_beat()
 	var tolerance: float = LASER_RELEASE_EARLY_WINDOW if release_offset < 0.0 else LASER_RELEASE_LATE_WINDOW
 	return clampf(1.0 - absf(release_offset) / tolerance, 0.0, 1.0)
 
+func setup_calibration_audio() -> void:
+	calibration_audio_player = AudioStreamPlayer.new()
+	var generator := AudioStreamGenerator.new()
+	generator.mix_rate = 48000.0
+	generator.buffer_length = 0.35
+	calibration_audio_player.stream = generator
+	calibration_audio_player.volume_db = -8.0
+	add_child(calibration_audio_player)
+
+func start_calibration() -> void:
+	calibration_active = true
+	settings_open = false
+	waiting_for_keybind = false
+	calibration_taps.clear()
+	calibration_last_beat = -1
+	calibration_audio_frames_written = 0
+	calibration_start_msec = Time.get_ticks_msec() + roundi(CALIBRATION_AUDIO_LEAD_SECONDS * 1000.0)
+	calibration_audio_player.play()
+	calibration_audio_playback = calibration_audio_player.get_stream_playback()
+	calibration_result = "Listening: wait four clicks, then tap F / Enter / Space on the beat"
+
+func stop_calibration(cancelled: bool = false) -> void:
+	calibration_active = false
+	calibration_audio_player.stop()
+	calibration_audio_playback = null
+	if cancelled:
+		calibration_result = "Calibration cancelled — previous offset kept"
+	settings_open = true
+	settings_selection = 12
+	if not lan_mode:
+		reset_game()
+
+func feed_calibration_audio() -> void:
+	if calibration_audio_playback == null:
+		return
+	var available := calibration_audio_playback.get_frames_available()
+	for frame_index in range(available):
+		var generated_time := float(calibration_audio_frames_written) / 48000.0 - CALIBRATION_AUDIO_LEAD_SECONDS
+		var amplitude := 0.0
+		if generated_time >= 0.0:
+			var beat_phase := fmod(generated_time, CALIBRATION_BEAT_SECONDS)
+			if beat_phase < 0.038:
+				var envelope := 1.0 - beat_phase / 0.038
+				var click_frequency := 1040.0 if is_zero_approx(beat_phase) else 780.0
+				amplitude = sin(TAU * click_frequency * generated_time) * envelope * 0.34
+		calibration_audio_playback.push_frame(Vector2(amplitude, amplitude))
+		calibration_audio_frames_written += 1
+
+func register_calibration_tap() -> void:
+	if not calibration_active:
+		return
+	var sample_time := float(Time.get_ticks_msec() - calibration_start_msec) / 1000.0
+	if sample_time < 0.0:
+		return
+	var nearest_beat := roundi(sample_time / CALIBRATION_BEAT_SECONDS)
+	if nearest_beat < CALIBRATION_COUNT_IN_BEATS or nearest_beat == calibration_last_beat:
+		return
+	calibration_last_beat = nearest_beat
+	var error := sample_time - float(nearest_beat) * CALIBRATION_BEAT_SECONDS
+	if absf(error) > CALIBRATION_MAX_ERROR_SECONDS:
+		calibration_result = "Tap was too far from the beat — keep following the clicks"
+		return
+	calibration_taps.append(error)
+	calibration_result = "Calibration: %d / %d valid taps · latest %+.0f ms" % [calibration_taps.size(), CALIBRATION_REQUIRED_TAPS, error * 1000.0]
+	if calibration_taps.size() >= CALIBRATION_REQUIRED_TAPS:
+		finish_calibration()
+
+func finish_calibration() -> void:
+	var offset := robust_calibration_offset()
+	beat_offset_seconds = clampf(offset, -MAX_BEAT_OFFSET, MAX_BEAT_OFFSET)
+	calibration_result = "Calibration saved: %+.0f ms from %d stable taps" % [beat_offset_seconds * 1000.0, calibration_taps.size()]
+	stop_calibration()
+
+func robust_calibration_offset() -> float:
+	var sorted_samples: Array[float] = []
+	sorted_samples.append_array(calibration_taps)
+	sorted_samples.sort()
+	var median := sorted_samples[sorted_samples.size() / 2]
+	var deviations: Array[float] = []
+	for sample in sorted_samples:
+		deviations.append(absf(sample - median))
+	deviations.sort()
+	var median_deviation := deviations[deviations.size() / 2]
+	var acceptance := maxf(0.018, median_deviation * 2.5)
+	var total := 0.0
+	var accepted_count := 0
+	for sample in sorted_samples:
+		if absf(sample - median) <= acceptance:
+			total += sample
+			accepted_count += 1
+	if accepted_count < CALIBRATION_MIN_VALID_TAPS:
+		return median
+	return total / float(accepted_count)
+
 func _unhandled_input(event: InputEvent) -> void:
+	if calibration_active:
+		if event is InputEventKey and event.pressed and not event.echo:
+			if event.keycode == KEY_ESCAPE:
+				stop_calibration(true)
+			elif event.keycode == KEY_F or event.keycode == KEY_ENTER or event.keycode == KEY_SPACE:
+				register_calibration_tap()
+		elif event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+			register_calibration_tap()
+		return
 	if event is InputEventMouseButton:
 		if settings_open:
 			if event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
@@ -920,17 +1028,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			charge_release_beat = -1
 		return
 	if event is InputEventKey and not event.pressed:
-		if event.keycode == KEY_LEFT and delay_adjust_direction == -1:
-			delay_adjust_direction = 0
-		elif event.keycode == KEY_RIGHT and delay_adjust_direction == 1:
-			delay_adjust_direction = 0
 		return
 	if not event is InputEventKey or not event.pressed or event.echo:
 		return
 	if event.keycode == KEY_ESCAPE:
 		settings_open = not settings_open
 		waiting_for_keybind = false
-		delay_adjust_direction = 0
 		if settings_open:
 			disable_local_gameplay_for_settings()
 		return
@@ -996,14 +1099,12 @@ func handle_settings_input(keycode: Key) -> void:
 		return
 	if keycode == KEY_UP:
 		settings_selection = posmod(settings_selection - 1, 14)
-		delay_adjust_direction = 0
 	elif keycode == KEY_DOWN:
 		settings_selection = posmod(settings_selection + 1, 14)
-		delay_adjust_direction = 0
 	elif keycode == KEY_ENTER and settings_selection < 12:
 		waiting_for_keybind = true
-	elif settings_selection == 12 and (keycode == KEY_LEFT or keycode == KEY_RIGHT):
-		adjust_selected_setting(-1 if keycode == KEY_LEFT else 1, true)
+	elif settings_selection == 12 and keycode == KEY_ENTER:
+		start_calibration()
 	elif settings_selection == 13 and (keycode == KEY_LEFT or keycode == KEY_RIGHT):
 		adjust_selected_setting(-1 if keycode == KEY_LEFT else 1)
 
@@ -1013,7 +1114,9 @@ func handle_settings_mouse_click(mouse_position: Vector2) -> void:
 		return
 	settings_selection = clicked_row
 	waiting_for_keybind = false
-	if clicked_row >= 12 and mouse_position.x >= 1090.0:
+	if clicked_row == 12:
+		start_calibration()
+	elif clicked_row == 13 and mouse_position.x >= 1090.0:
 		adjust_selected_setting(-1 if mouse_position.x < 1260.0 else 1)
 
 func get_settings_row_at(mouse_position: Vector2) -> int:
@@ -1022,31 +1125,12 @@ func get_settings_row_at(mouse_position: Vector2) -> int:
 	return clampi(floori((mouse_position.y - 220.0) / 62.0), 0, 13)
 
 func adjust_selected_setting(direction: int, allow_repeat: bool = false) -> void:
-	if settings_selection == 12:
-		if lan_mode:
-			adjust_lan_start_lead(direction)
-			return
-		if allow_repeat:
-			delay_adjust_direction = direction
-			delay_adjust_hold_time = 0.0
-			delay_adjust_repeat_time = 0.0
-		adjust_song_start_delay(direction)
-	elif settings_selection == 13:
+	if settings_selection == 13:
 		if lan_mode:
 			adjust_lan_bot_count(direction)
 			return
 		bot_count = clampi(bot_count + direction, 0, 3)
 		reset_game()
-
-func adjust_lan_start_lead(direction: int) -> void:
-	if not lan_is_host:
-		lan_status = "Host controls room settings"
-		return
-	var updated_lead := clampf(lan_start_lead_seconds + float(direction) * LAN_DELAY_STEP, MIN_LAN_START_LEAD_SECONDS, MAX_LAN_START_LEAD_SECONDS)
-	if is_equal_approx(updated_lead, lan_start_lead_seconds):
-		return
-	lan_start_lead_seconds = updated_lead
-	restart_lan_match()
 
 func adjust_lan_bot_count(direction: int) -> void:
 	if not lan_is_host:
@@ -1098,16 +1182,16 @@ func update_ai(delta: float, bot_index: int) -> void:
 		ai_next_path_updates[state_index] = elapsed + 0.55
 	var direction := find_ai_steering_direction(bot, ai_waypoints[state_index])
 	bot.tick(delta, direction, geometry)
-	var current_beat := floori(beat_time() / ATTACK_BEAT_SECONDS)
+	var current_beat := floori(calibrated_beat_position() * 2.0)
 	if current_beat != ai_last_attack_beats[state_index] and ai_scheduled_shot_times[state_index] < 0.0:
 		ai_last_attack_beats[state_index] = current_beat
 		ai_scheduled_shot_times[state_index] = -1.0
 		ai_scheduled_lasers[state_index] = false
 		var fire_chance := 1.0 if has_open_fire_lane else (AI_FIRE_CHANCE if has_direct_sight else AI_BOUNCE_FIRE_CHANCE)
 		if distance < AI_FIRE_RANGE and randf() < fire_chance:
-			ai_scheduled_shot_times[state_index] = float(current_beat + 1) * ATTACK_BEAT_SECONDS + randf_range(-AI_TIMING_JITTER, AI_TIMING_JITTER)
+			ai_scheduled_shot_times[state_index] = float(current_beat + 1) * 0.5 + randf_range(-AI_TIMING_JITTER, AI_TIMING_JITTER) / beat_clock.seconds_per_beat()
 			ai_scheduled_lasers[state_index] = has_direct_sight and distance > 480.0 and randf() < AI_LASER_CHANCE
-	if ai_scheduled_shot_times[state_index] >= 0.0 and beat_time() >= ai_scheduled_shot_times[state_index]:
+	if ai_scheduled_shot_times[state_index] >= 0.0 and calibrated_beat_position() >= ai_scheduled_shot_times[state_index]:
 		if distance < AI_FIRE_RANGE:
 			if ai_scheduled_lasers[state_index]:
 				fire_laser(bot)
@@ -1294,8 +1378,8 @@ func start_countdown_number() -> int:
 	return maxi(0, ceili(-elapsed))
 
 func timing_grade() -> Array:
-	var phase := fmod(beat_time(), ATTACK_BEAT_SECONDS)
-	var distance := minf(phase, ATTACK_BEAT_SECONDS - phase)
+	var attack_phase := posmod(calibrated_beat_position() * 2.0, 1.0)
+	var distance := minf(attack_phase, 1.0 - attack_phase) * beat_clock.seconds_per_beat() * 0.5
 	if distance <= PERFECT_WINDOW:
 		return ["perfect", 22]
 	if distance <= GOOD_WINDOW:
@@ -1346,7 +1430,7 @@ func attack(player: ArenaPlayerState) -> void:
 			radius = 16.0
 			brightness = 0.37
 	player.attack_cooldown = 0.10 if grade == "perfect" or grade == "good" else 0.16
-	player.apply_slow(0.10, BEAT_SECONDS)
+	player.apply_slow(0.10, beat_clock.seconds_per_beat())
 	var color := player.tint.darkened(1.0 - brightness)
 	projectiles.append(ArenaProjectileState.new(player.position + player.facing * (44.0 + radius), player.facing * speed, player.index, damage, radius, color))
 	if grade == "perfect":
@@ -1453,8 +1537,9 @@ func _draw() -> void:
 			var corpse_color := player.tint.darkened(0.78)
 			draw_circle(player.position, PLAYER_RADIUS, corpse_color)
 			draw_arc(player.position, PLAYER_RADIUS, 0.0, TAU, 32, Color(corpse_color.lightened(0.22), 0.55), 3.0)
-	var phase := fmod(beat_time(), BEAT_SECONDS)
-	var pulse := maxf(0.0, 1.0 - phase / 0.13) if phase < 0.13 else 0.0
+	var full_beat_phase := posmod(calibrated_beat_position(), 1.0)
+	var pulse_window := 0.13 / beat_clock.seconds_per_beat()
+	var pulse := maxf(0.0, 1.0 - full_beat_phase / pulse_window) if full_beat_phase < pulse_window else 0.0
 	draw_arc(ARENA_SIZE / 2.0, 140.0 + pulse * 76.0, 0.0, TAU, 64, Color("414654"), 4.0)
 	draw_arc(ARENA_SIZE / 2.0, 140.0, 0.0, TAU, 64, Color("2d313e"), 2.0)
 	for projectile in projectiles:
@@ -1474,10 +1559,10 @@ func _draw() -> void:
 		draw_circle(player.position, PLAYER_RADIUS, display_color)
 		draw_arc(player.position, PLAYER_RADIUS, 0.0, TAU, 32, TEXT, 4.0)
 		draw_line(player.position, player.position + player.facing * 28.0, BACKGROUND, 6.0)
-		var visual_attack_time: float = elapsed - beat_offset_seconds
-		var beat_fill: float = 0.5 - 0.5 * cos(PI * visual_attack_time / ATTACK_BEAT_SECONDS)
+		var visual_attack_phase: float = calibrated_beat_position() * 2.0
+		var beat_fill: float = 0.5 - 0.5 * cos(PI * visual_attack_phase)
 		var beat_bar := Rect2(player.position + Vector2(-58.0, -88.0), Vector2(116.0, 12.0))
-		var beat_glow: float = pow(absf(cos(PI * visual_attack_time / ATTACK_BEAT_SECONDS)), 6.0)
+		var beat_glow: float = pow(absf(cos(PI * visual_attack_phase)), 6.0)
 		var beat_color := player.tint.darkened(0.12).lerp(player.tint.lightened(0.35), beat_glow)
 		var beat_marker_x: float = beat_bar.position.x + 12.0 + 92.0 * beat_fill
 		var beat_marker := Rect2(beat_marker_x - 10.0, beat_bar.position.y + 2.0, 20.0, 8.0)
@@ -1488,20 +1573,14 @@ func _draw() -> void:
 		var fatigue_color := Color("f7ae4f") if player.fatigue < 7.0 else Color("f66060")
 		draw_arc(player.position, 56.0, -PI / 2.0, -PI / 2.0 + TAU * player.fatigue / 10.0, 32, fatigue_color, 6.0)
 		var charge_is_active := player.index == 0 and charging_laser
-		var visual_charge_started_msec := 0
 		var visual_release_beat := charge_release_beat
 		if lan_mode and player.index < player_owners.size():
 			var network_charge_state: Dictionary = network_charge_states.get(player_owners[player.index], {})
 			charge_is_active = bool(network_charge_state.get("started_on_beat", false))
-			visual_charge_started_msec = int(network_charge_state.get("started_at_msec", 0))
 			visual_release_beat = int(network_charge_state.get("release_beat", -1))
 		if charge_is_active:
-			var charge_elapsed: float = elapsed - charge_started_at
-			if lan_mode:
-				charge_elapsed = float(network_time_msec() - visual_charge_started_msec) / 1000.0
-			var charge_ratio: float = clampf(charge_elapsed / LASER_CHARGE_TIME, 0.0, 1.0)
-			var ideal_release_time: float = float(visual_release_beat) * BEAT_SECONDS
-			var dissipate_ratio: float = clampf((beat_time() - ideal_release_time) / LASER_DISSIPATE_TIME, 0.0, 1.0)
+			var charge_ratio: float = clampf(calibrated_beat_position() - float(visual_release_beat - 1), 0.0, 1.0)
+			var dissipate_ratio: float = clampf((calibrated_beat_position() - float(visual_release_beat)) * beat_clock.seconds_per_beat() / LASER_DISSIPATE_TIME, 0.0, 1.0)
 			var charge_alpha: float = (0.35 + charge_ratio * 0.65) * (1.0 - dissipate_ratio)
 			var charge_color := player.tint.lightened(0.28) if charge_ratio >= 1.0 else Color("b7c4d5")
 			var side: Vector2 = Vector2(-player.facing.y, player.facing.x)
@@ -1521,7 +1600,7 @@ func _draw() -> void:
 	draw_rect(style_bar, TEXT, false, 2.0)
 	draw_string(font, Vector2(760.0, 62.0), "STYLE  P1 %.0f%%  /  P2 %.0f%%" % [style_weights[0] * 100.0, style_weights[1] * 100.0], HORIZONTAL_ALIGNMENT_LEFT, -1, 24, TEXT)
 	var capture_label := "CENTER: contested" if capture_contested else ("CENTER: P%d healing" % (capture_owner + 1) if capture_owner >= 0 and capture_hold_time >= CAPTURE_ACTIVATION_SECONDS else "CENTER: neutral")
-	draw_string(font, Vector2(760.0, 88.0), "%s · temperature %.2f" % [capture_label, music_temperature], HORIZONTAL_ALIGNMENT_LEFT, -1, 22, Color("bec3cf"))
+	draw_string(font, Vector2(760.0, 88.0), "%s · BPM %.1f · temperature %.2f" % [capture_label, beat_clock.current_bpm(), music_temperature], HORIZONTAL_ALIGNMENT_LEFT, -1, 22, Color("bec3cf"))
 	for player in players:
 		var x := 60.0 + 480.0 * float(player.index)
 		draw_string(font, Vector2(x, 56), "P%d  %d / %d" % [player.index + 1, player.health, MAX_HEALTH], HORIZONTAL_ALIGNMENT_LEFT, -1, 36, TEXT)
@@ -1529,9 +1608,10 @@ func _draw() -> void:
 		draw_rect(Rect2(x + 4.0, 80, 372.0 * float(player.health) / MAX_HEALTH, 20), player.tint, true)
 		draw_rect(Rect2(x, 76, 380, 28), TEXT, false, 2.0)
 		draw_string(font, Vector2(x, 144), "fatigue %.1f / 10" % player.fatigue, HORIZONTAL_ALIGNMENT_LEFT, -1, 28, Color("bec3cf"))
-	draw_string(font, Vector2(300, 1212), lan_status, HORIZONTAL_ALIGNMENT_LEFT, -1, 28, Color("72dbff"))
-	draw_string(font, Vector2(300, 1260), "Beat buffer: [ earlier · ] later · \\ reset   %+.0f ms" % (beat_offset_seconds * 1000.0), HORIZONTAL_ALIGNMENT_LEFT, -1, 28, Color("bec3cf"))
-	draw_string(font, Vector2(300, 1308), "Mouse: aim / charge laser · %s / %s: shot · %s / %s: dash · Esc: settings" % [OS.get_keycode_string(attack_key), OS.get_keycode_string(attack_secondary_key), OS.get_keycode_string(dash_key), OS.get_keycode_string(dash_secondary_key)], HORIZONTAL_ALIGNMENT_LEFT, -1, 28, Color("bec3cf"))
+	if not is_combat_started() or winner != -1:
+		draw_string(font, Vector2(300, 1212), lan_status, HORIZONTAL_ALIGNMENT_LEFT, -1, 28, Color("72dbff"))
+		draw_string(font, Vector2(300, 1260), "Music latency: %+.0f ms · [ / ] manually adjust · \\ reset" % (beat_offset_seconds * 1000.0), HORIZONTAL_ALIGNMENT_LEFT, -1, 28, Color("bec3cf"))
+		draw_string(font, Vector2(300, 1308), "Mouse: aim / charge laser · %s / %s: shot · %s / %s: dash · Esc: settings" % [OS.get_keycode_string(attack_key), OS.get_keycode_string(attack_secondary_key), OS.get_keycode_string(dash_key), OS.get_keycode_string(dash_secondary_key)], HORIZONTAL_ALIGNMENT_LEFT, -1, 28, Color("bec3cf"))
 	var countdown := start_countdown_number()
 	if countdown > 0 and not settings_open:
 		draw_string(font, Vector2(0, 640), str(countdown), HORIZONTAL_ALIGNMENT_CENTER, int(DISPLAY_SIZE.x), 144, Color("72dbff"))
@@ -1539,16 +1619,34 @@ func _draw() -> void:
 		draw_string(font, Vector2(0, ARENA_SIZE.y / 2.0), "PLAYER %d WINS — press R to restart" % (winner + 1), HORIZONTAL_ALIGNMENT_CENTER, int(ARENA_SIZE.x), 42, TEXT)
 	if settings_open:
 		draw_settings_panel()
+	if calibration_active:
+		draw_calibration_overlay()
+
+func draw_calibration_overlay() -> void:
+	draw_rect(Rect2(0, 0, DISPLAY_SIZE.x, DISPLAY_SIZE.y), Color(0.03, 0.04, 0.07, 0.94), true)
+	var sample_time := float(Time.get_ticks_msec() - calibration_start_msec) / 1000.0
+	var beat_index := maxi(0, floori(sample_time / CALIBRATION_BEAT_SECONDS))
+	var beat_phase := posmod(sample_time, CALIBRATION_BEAT_SECONDS) / CALIBRATION_BEAT_SECONDS
+	var pulse := 1.0 - beat_phase
+	var pulse_color := Color("72dbff").lerp(Color("f3f7ff"), pulse)
+	draw_circle(DISPLAY_SIZE / 2.0, 90.0 + pulse * 110.0, Color(pulse_color, 0.18))
+	draw_circle(DISPLAY_SIZE / 2.0, 48.0 + pulse * 30.0, pulse_color)
+	draw_string(font, Vector2(0, 370), "MUSIC LATENCY CALIBRATION · 120 BPM", HORIZONTAL_ALIGNMENT_CENTER, int(DISPLAY_SIZE.x), 42, TEXT)
+	var instruction := "Listen: %d / %d" % [beat_index + 1, CALIBRATION_COUNT_IN_BEATS] if beat_index < CALIBRATION_COUNT_IN_BEATS else "Tap F / Enter / Space / Left Click on each click"
+	draw_string(font, Vector2(0, 450), instruction, HORIZONTAL_ALIGNMENT_CENTER, int(DISPLAY_SIZE.x), 32, Color("bec3cf"))
+	draw_string(font, Vector2(0, 510), "%d / %d valid taps" % [calibration_taps.size(), CALIBRATION_REQUIRED_TAPS], HORIZONTAL_ALIGNMENT_CENTER, int(DISPLAY_SIZE.x), 38, pulse_color)
+	draw_string(font, Vector2(0, 580), calibration_result, HORIZONTAL_ALIGNMENT_CENTER, int(DISPLAY_SIZE.x), 28, TEXT)
+	draw_string(font, Vector2(0, 1160), "Esc: cancel · signed result accounts for your audio/display path", HORIZONTAL_ALIGNMENT_CENTER, int(DISPLAY_SIZE.x), 24, Color("bec3cf"))
 
 func draw_settings_panel() -> void:
 	draw_rect(Rect2(500, 110, 1000, 1140), Color(0.05, 0.06, 0.09, 0.96), true)
 	draw_rect(Rect2(500, 110, 1000, 1140), Color("a8b3c7"), false, 4.0)
 	draw_string(font, Vector2(580, 180), "SETTINGS", HORIZONTAL_ALIGNMENT_LEFT, -1, 48, TEXT)
-	var labels: Array[String] = ["Move up — Primary", "Move up — Secondary", "Move down — Primary", "Move down — Secondary", "Move left — Primary", "Move left — Secondary", "Move right — Primary", "Move right — Secondary", "Normal shot — Primary", "Normal shot — Secondary", "Dash — Primary", "Dash — Secondary", "Room countdown — Host only" if lan_mode else "Solo start delay", "AI opponents — Host only" if lan_mode else "AI opponents"]
+	var labels: Array[String] = ["Move up — Primary", "Move up — Secondary", "Move down — Primary", "Move down — Secondary", "Move left — Primary", "Move left — Secondary", "Move right — Primary", "Move right — Secondary", "Normal shot — Primary", "Normal shot — Secondary", "Dash — Primary", "Dash — Secondary", "Music latency calibration", "AI opponents — Host only" if lan_mode else "AI opponents"]
 	for row in range(14):
 		var y: float = 260.0 + 62.0 * float(row)
 		var selected := row == settings_selection
-		var locked_shared_setting := lan_mode and not lan_is_host and row >= 12
+		var locked_shared_setting := lan_mode and not lan_is_host and row == 13
 		var color := Color("657282") if locked_shared_setting else (Color("72dbff") if selected else TEXT)
 		var value := ""
 		if row < 8:
@@ -1563,14 +1661,19 @@ func draw_settings_panel() -> void:
 		elif row == 11:
 			value = OS.get_keycode_string(dash_secondary_key)
 		elif row == 12:
-			value = "%.1f s" % lan_start_lead_seconds if lan_mode else "%d ms" % roundi(song_start_delay * 1000.0)
+			value = "RUN · current %+.0f ms" % (beat_offset_seconds * 1000.0)
 		else:
 			value = "%d" % bot_count
 		if selected:
 			draw_rect(Rect2(550, y - 43.0, 900, 52), Color("243448"), true)
 			draw_rect(Rect2(550, y - 43.0, 900, 52), Color("72dbff"), false, 2.0)
 		draw_string(font, Vector2(610, y), ("> " if selected else "  ") + labels[row], HORIZONTAL_ALIGNMENT_LEFT, -1, 32, color)
-		if row >= 12:
+		if row == 12:
+			var calibration_rect := Rect2(1090, y - 40.0, 340, 42)
+			draw_rect(calibration_rect, Color("31506b") if selected else Color("2b3442"), true)
+			draw_rect(calibration_rect, color, false, 2.0)
+			draw_string(font, Vector2(1138, y - 8.0), value, HORIZONTAL_ALIGNMENT_LEFT, -1, 28, color)
+		elif row == 13:
 			var minus_rect := Rect2(1090, y - 40.0, 70, 42)
 			var plus_rect := Rect2(1360, y - 40.0, 70, 42)
 			var button_color := Color("202934") if locked_shared_setting else (Color("31506b") if selected else Color("2b3442"))
@@ -1583,7 +1686,7 @@ func draw_settings_panel() -> void:
 			draw_string(font, Vector2(1190, y), value, HORIZONTAL_ALIGNMENT_LEFT, -1, 32, color)
 		else:
 			draw_string(font, Vector2(1120, y), value, HORIZONTAL_ALIGNMENT_LEFT, -1, 32, color)
-	var help := "Press a key to bind" if waiting_for_keybind else "Click a row to select · Enter: rebind · Click −/+ or Left/Right: adjust · Esc: close"
+	var help := "Press a key to bind" if waiting_for_keybind else "Calibration: Enter/click Run · AI: Click −/+ or Left/Right · Esc: close"
 	if lan_mode:
-		help = "AI/countdown are shared: host changes restart and sync the room" if lan_is_host else "AI/countdown are shared: only the host can change them"
+		help = "Calibration is local · AI is shared: host changes restart and sync the room" if lan_is_host else "Calibration is local · only the host can change AI"
 	draw_string(font, Vector2(580, 1200), help, HORIZONTAL_ALIGNMENT_LEFT, -1, 24, Color("bec3cf"))
