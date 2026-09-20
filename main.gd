@@ -42,7 +42,7 @@ const RESONANCE_DURATION_SECONDS := 2.5
 const RESONANCE_COOLDOWN_SECONDS := 4.0
 const TEMPO_EVALUATION_BEATS := 16
 const CALIBRATION_BPM := 120.0
-const CALIBRATION_BEAT_SECONDS := 60.0 / CALIBRATION_BPM
+const CALIBRATION_BEAT_SECONDS: float = 0.5
 const CALIBRATION_COUNT_IN_BEATS := 4
 const CALIBRATION_REQUIRED_TAPS := 12
 const CALIBRATION_MAX_ERROR_SECONDS := 0.220
@@ -935,11 +935,12 @@ func feed_calibration_audio() -> void:
 	if calibration_audio_playback == null:
 		return
 	var available := calibration_audio_playback.get_frames_available()
+	var calibration_interval := maxf(CALIBRATION_BEAT_SECONDS, 0.001)
 	for frame_index in range(available):
 		var generated_time := float(calibration_audio_frames_written) / 48000.0 - CALIBRATION_AUDIO_LEAD_SECONDS
 		var amplitude := 0.0
 		if generated_time >= 0.0:
-			var beat_phase := fmod(generated_time, CALIBRATION_BEAT_SECONDS)
+			var beat_phase := fmod(generated_time, calibration_interval)
 			if beat_phase < 0.038:
 				var envelope := 1.0 - beat_phase / 0.038
 				var click_frequency := 1040.0 if is_zero_approx(beat_phase) else 780.0
@@ -951,13 +952,14 @@ func register_calibration_tap() -> void:
 	if not calibration_active:
 		return
 	var sample_time := float(Time.get_ticks_msec() - calibration_start_msec) / 1000.0
+	var calibration_interval := maxf(CALIBRATION_BEAT_SECONDS, 0.001)
 	if sample_time < 0.0:
 		return
-	var nearest_beat := roundi(sample_time / CALIBRATION_BEAT_SECONDS)
+	var nearest_beat := roundi(sample_time / calibration_interval)
 	if nearest_beat < CALIBRATION_COUNT_IN_BEATS or nearest_beat == calibration_last_beat:
 		return
 	calibration_last_beat = nearest_beat
-	var error := sample_time - float(nearest_beat) * CALIBRATION_BEAT_SECONDS
+	var error := sample_time - float(nearest_beat) * calibration_interval
 	if absf(error) > CALIBRATION_MAX_ERROR_SECONDS:
 		calibration_result = "Tap was too far from the beat — keep following the clicks"
 		return
@@ -1641,8 +1643,9 @@ func _draw() -> void:
 func draw_calibration_overlay() -> void:
 	draw_rect(Rect2(0, 0, DISPLAY_SIZE.x, DISPLAY_SIZE.y), Color(0.03, 0.04, 0.07, 0.94), true)
 	var sample_time := float(Time.get_ticks_msec() - calibration_start_msec) / 1000.0
-	var beat_index := maxi(0, floori(sample_time / CALIBRATION_BEAT_SECONDS))
-	var beat_phase := posmod(sample_time, CALIBRATION_BEAT_SECONDS) / CALIBRATION_BEAT_SECONDS
+	var calibration_interval := maxf(CALIBRATION_BEAT_SECONDS, 0.001)
+	var beat_index := maxi(0, floori(sample_time / calibration_interval))
+	var beat_phase := posmod(sample_time, calibration_interval) / calibration_interval
 	var pulse := 1.0 - beat_phase
 	var pulse_color := Color("72dbff").lerp(Color("f3f7ff"), pulse)
 	draw_circle(DISPLAY_SIZE / 2.0, 90.0 + pulse * 110.0, Color(pulse_color, 0.18))
