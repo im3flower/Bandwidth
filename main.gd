@@ -315,6 +315,25 @@ func join_lan_game(address: String = LAN_JOIN_ADDRESS) -> void:
 	lan_is_host = false
 	lan_status = "Connecting to %s:%d" % [address, NetworkProtocol.DEFAULT_PORT]
 
+func leave_lan_room() -> void:
+	if not lan_mode:
+		return
+	lan_mode = false
+	lan_is_host = false
+	match_start_server_msec = 0
+	player_owners.clear()
+	peer_inputs.clear()
+	last_input_sequence.clear()
+	network_action_queues.clear()
+	network_charge_states.clear()
+	var active_peer := multiplayer.multiplayer_peer
+	if active_peer != null:
+		active_peer.close()
+	multiplayer.multiplayer_peer = OfflineMultiplayerPeer.new()
+	lan_status = "Solo — left LAN room"
+	settings_open = false
+	reset_game()
+
 func setup_lan_match(human_owners: Array[int] = [1]) -> void:
 	reset_game()
 	projectiles.clear()
@@ -458,10 +477,14 @@ func _on_connected_to_server() -> void:
 	lan_status = "Connected — synchronizing host clock"
 
 func _on_connection_failed() -> void:
+	if not lan_mode:
+		return
 	lan_status = "Connection failed"
 	lan_mode = false
 
 func _on_server_disconnected() -> void:
+	if not lan_mode:
+		return
 	lan_status = "Host disconnected"
 	lan_mode = false
 
@@ -1108,6 +1131,9 @@ func handle_settings_input(keycode: Key) -> void:
 			dash_secondary_key = keycode
 		waiting_for_keybind = false
 		return
+	if lan_mode and keycode == KEY_L:
+		leave_lan_room()
+		return
 	if keycode == KEY_UP:
 		settings_selection = posmod(settings_selection - 1, 14)
 	elif keycode == KEY_DOWN:
@@ -1120,6 +1146,9 @@ func handle_settings_input(keycode: Key) -> void:
 		adjust_selected_setting(-1 if keycode == KEY_LEFT else 1)
 
 func handle_settings_mouse_click(mouse_position: Vector2) -> void:
+	if lan_mode and leave_room_button_rect().has_point(mouse_position):
+		leave_lan_room()
+		return
 	var clicked_row := get_settings_row_at(mouse_position)
 	if clicked_row < 0:
 		return
@@ -1134,6 +1163,9 @@ func get_settings_row_at(mouse_position: Vector2) -> int:
 	if mouse_position.x < 550.0 or mouse_position.x > 1450.0 or mouse_position.y < 220.0 or mouse_position.y >= 1088.0:
 		return -1
 	return clampi(floori((mouse_position.y - 220.0) / 62.0), 0, 13)
+
+func leave_room_button_rect() -> Rect2:
+	return Rect2(1060.0, 1120.0, 370.0, 56.0)
 
 func adjust_selected_setting(direction: int, allow_repeat: bool = false) -> void:
 	if settings_selection == 13:
@@ -1705,7 +1737,12 @@ func draw_settings_panel() -> void:
 			draw_string(font, Vector2(1190, y), value, HORIZONTAL_ALIGNMENT_LEFT, -1, 32, color)
 		else:
 			draw_string(font, Vector2(1120, y), value, HORIZONTAL_ALIGNMENT_LEFT, -1, 32, color)
+	if lan_mode:
+		var leave_rect := leave_room_button_rect()
+		draw_rect(leave_rect, Color("552934"), true)
+		draw_rect(leave_rect, Color("ff7882"), false, 2.0)
+		draw_string(font, Vector2(1124.0, 1158.0), "LEAVE ROOM  [L]", HORIZONTAL_ALIGNMENT_LEFT, -1, 28, Color("ffe7ea"))
 	var help := "Press a key to bind" if waiting_for_keybind else "Calibration: Enter/click Run · AI: Click −/+ or Left/Right · Esc: close"
 	if lan_mode:
-		help = "Calibration is local · AI is shared: host changes restart and sync the room" if lan_is_host else "Calibration is local · only the host can change AI"
-	draw_string(font, Vector2(580, 1200), help, HORIZONTAL_ALIGNMENT_LEFT, -1, 24, Color("bec3cf"))
+		help = "L/click Leave Room · Calibration is local · AI is shared: host changes restart and sync the room" if lan_is_host else "L/click Leave Room · Calibration is local · only the host can change AI"
+	draw_string(font, Vector2(580, 1225), help, HORIZONTAL_ALIGNMENT_LEFT, -1, 24, Color("bec3cf"))
