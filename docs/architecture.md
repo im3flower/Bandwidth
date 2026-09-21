@@ -25,7 +25,7 @@ Evolve the Godot 4 prototype into a LAN multiplayer rhythm arena game where the 
 
 ## Music synchronization contract
 
-The host creates a match with a `start_time_msec` sufficiently in the future (currently 5 seconds). It broadcasts one `MusicPlan` containing the starting BPM, seed/session ID, start time, and cues whose start points are expressed in beats. `BeatClock` also serializes a tempo-segment schedule: changes are bar-quantized, at least 16 beats apart, limited to 2 BPM each, and clamped to 120–136 BPM. Combat remains independent and begins at the match timestamp.
+The host creates a match with a `start_time_msec` sufficiently in the future (currently 5 seconds). It broadcasts one `MusicPlan` containing the starting BPM, seed/session ID, start time, tempo-segment schedule, and cues whose start points are expressed in beats. `BeatClock` is the sole schedule authority; `MusicPlan` serializes its tempo segments for clients and the Magenta bridge. The built-in metronome starts only during a short final audio-buffer lead, queues the first click at beat zero, and converts every later queued frame through the active tempo segment. Changes are bar-quantized, limited to 6 BPM each, and clamped to 80–180 BPM; the first response may occur on the next bar, while later changes are at least ten real-time seconds apart. Combat remains independent and begins at the match timestamp.
 
 A cue should contain only stable data such as:
 
@@ -38,11 +38,11 @@ The generator must render ahead of playback. Late generated audio is scheduled o
 
 ## LAN protocol phases
 
-1. Client connects through ENet and sends `hello` with supported protocol version.
-2. Host assigns up to four human player slots and sends reliable `match_config` plus the current `music_plan` and authoritative owner roster.
-3. Client estimates server time, prepares audio, and waits for the shared start timestamp.
-4. Client sends sequenced input at a fixed rate. Host validates and simulates it.
-5. Host sends snapshots at 60 Hz and reliable discrete events for joins, round transitions, and music-plan revisions.
+1. Client connects through ENet. The host assigns one of up to four human slots, then starts or restarts the lobby countdown.
+2. Host sends reliable `match_config` with the shared start timestamp, BPM, owner roster, local slot, and bot count.
+3. Client estimates server time, prepares local presentation audio, and waits for the shared start timestamp.
+4. Client sends sequenced movement/facing input; discrete shot, dash, and laser transitions use reliable action RPCs. The host validates and simulates all combat.
+5. Host sends snapshots at 60 Hz. Snapshots replicate entity state, active laser charge state, tempo segments, and the current `MusicPlan` revision. A future protocol revision can promote plan updates to a dedicated reliable message when generated audio is added.
 
 ## Incremental implementation order
 

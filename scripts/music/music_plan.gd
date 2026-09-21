@@ -9,6 +9,7 @@ var bpm := 130.0
 var start_time_msec := 0
 var revision := 0
 var cues: Array[Dictionary] = []
+var tempo_segments: Array[Dictionary] = []
 
 func configure(new_session_id: String, beats_per_minute: float, start_msec: int) -> void:
 	session_id = new_session_id
@@ -16,6 +17,11 @@ func configure(new_session_id: String, beats_per_minute: float, start_msec: int)
 	start_time_msec = start_msec
 	revision = 0
 	cues.clear()
+	tempo_segments = [{"start_beat": 0.0, "start_time": 0.0, "bpm": bpm}]
+
+func set_tempo_segments(segments: Array[Dictionary]) -> void:
+	if not segments.is_empty():
+		tempo_segments = segments.duplicate(true)
 
 func append_cue(cue: Dictionary) -> void:
 	cues.append(cue)
@@ -28,6 +34,7 @@ func to_payload() -> Dictionary:
 		"start_time_msec": start_time_msec,
 		"revision": revision,
 		"cues": cues.duplicate(true),
+		"tempo_segments": tempo_segments.duplicate(true),
 	}
 
 static func from_payload(payload: Dictionary) -> MusicPlan:
@@ -39,4 +46,9 @@ static func from_payload(payload: Dictionary) -> MusicPlan:
 	for cue in payload.get("cues", []):
 		if cue is Dictionary:
 			plan.cues.append(cue.duplicate(true))
+	for segment in payload.get("tempo_segments", []):
+		if segment is Dictionary:
+			plan.tempo_segments.append(segment.duplicate(true))
+	if plan.tempo_segments.is_empty():
+		plan.tempo_segments = [{"start_beat": 0.0, "start_time": 0.0, "bpm": plan.bpm}]
 	return plan

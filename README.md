@@ -17,7 +17,7 @@ See [`docs/architecture.md`](docs/architecture.md) for authority boundaries, the
 This branch adds an authoritative gameplay-to-music cue layer while keeping Magenta RT external:
 
 - **Style contest:** the P1/P2 style bar smoothly follows relative health.
-- **Chord laser:** an on-beat charge emits a root-note cue; release emits a quality-scaled chord cue.
+- **Chord laser:** press during any part of a beat to begin a one-beat charge; release in the tight next-downbeat window to emit a quality-scaled chord cue.
 - **Central control zone:** hold the central ring alone to receive gradual healing and a drum-density cue.
 - **Melody ammunition:** collect the purple note pickup, then make Good/Perfect shots to emit its three-note phrase.
 - **Chaos core:** collect the gold pickup for a temporary, bounded rise in generation temperature.
@@ -25,7 +25,9 @@ This branch adds an authoritative gameplay-to-music cue layer while keeping Mage
 
 `MusicPlan` now contains the host-authored cues and is replicated in LAN snapshots. The actual Magenta RT adapter, its API request format, authentication, audio generation, caching, and distribution are intentionally not implemented in Godot. See [`docs/magenta-rt-bridge.md`](docs/magenta-rt-bridge.md) for the exact cue-to-Magenta input mapping and prompt templates.
 
-The host uses a bounded tempo director: it evaluates match tension once every 16 beats, schedules only at a future bar boundary, and changes at most 2 BPM per step within 120–136 BPM. This keeps the current BPM readable for players while still giving Magenta a controlled long-form energy signal. `Esc` → **Music latency calibration** plays a built-in 120 BPM click track; after four count-in clicks, tap twelve beats with `F`, `Enter`, `Space`, or left click. The game robustly averages the signed timing error and stores the result as local presentation latency, so negative offsets are valid.
+The host uses a bounded tempo director with visible states: **STABLE** is 128 BPM, **MOMENTUM** (one player controls the center) targets 134 BPM, **PRESSURE** (the average health loss reaches 30%) targets 140 BPM, and **CLASH** (the center is contested) targets 146 BPM. It evaluates once per bar, schedules only at a future bar boundary, and changes at most 6 BPM per step within 80–180 BPM. Any two scheduled BPM changes are at least ten real-time seconds apart, so players have time to lock into the firing rhythm. The HUD shows the active state and target; Magenta receives this host-authored schedule and does not alter it. `Esc` → **Music latency calibration** plays a built-in 120 BPM click track; after four count-in clicks, tap twelve beats with `F`, `Enter`, `Space`, or left click. The game robustly averages the signed timing error and stores the result as local presentation latency, so negative offsets are valid.
+
+Until the Magenta bridge is connected, a built-in 4/4 metronome fills the soundtrack: it begins at the same first beat as the `BeatClock`, the first beat of each bar is accented, and every click follows the active BPM segment, including BPM changes.
 
 ## LAN test (up to four game processes)
 
@@ -42,7 +44,7 @@ For two to four computers on the same network, replace `LAN_JOIN_ADDRESS` in eac
 - `WASD`: move in eight directions
 - Mouse: aim
 - Left click (short press) or `F`: fire
-- Press left click on one beat and release on the next: charged laser
+- Press left click at any point during a beat and release on the next downbeat: charged laser
 - `Space`, `G`, or `Shift`: dash
 - `R`: restart after a round
 - `H`: host a LAN match, or join the existing local room when port `27877` is already occupied

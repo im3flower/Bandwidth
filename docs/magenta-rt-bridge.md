@@ -1,6 +1,6 @@
 # Magenta RT Bridge Contract
 
-`main.gd` implements authoritative gameplay and appends future-safe cue dictionaries to `MusicPlan`. It deliberately does **not** connect to Magenta Realtime, synthesize audio, or let model latency affect combat. A host-only bridge consumes the plan, renders ahead, and distributes identical audio/segments to clients.
+`BeatClock` is the sole BPM authority: the host's gameplay tempo director writes bar-aligned tempo segments, and `MusicPlan` serializes that exact schedule. Magenta Realtime is a downstream renderer. It must follow the received schedule and can never create, smooth, or retime BPM changes. `main.gd` deliberately does **not** connect to Magenta Realtime, synthesize audio, or let model latency affect combat. A host-only bridge consumes the plan, renders ahead, and distributes identical audio/segments to clients.
 
 ## Bridge inputs
 
@@ -20,14 +20,14 @@ Every request should include the stable match context below. Values are authored
 }
 ```
 
-The bridge must map player styles to the actual Magenta style conditioning representation. It must not claim that a numeric weight equals an audio volume ratio. `tempo_bpm` is required on every cue; `tempo_segments` is the host's authoritative upcoming tempo schedule. It changes only on bar boundaries, no more often than every 16 beats, and by at most 2 BPM, so the bridge must schedule its generated audio to the same changes rather than smoothing it independently.
+The bridge must map player styles to the actual Magenta style conditioning representation. It must not claim that a numeric weight equals an audio volume ratio. `tempo_bpm` is required on every cue; a `tempo_change` cue uses the scheduled target BPM, while other cues use the BPM active at their start. `tempo_segments` is the host's authoritative upcoming tempo schedule. It changes only on bar boundaries, no more often than every ten real-time seconds, by at most 6 BPM, and remains within 80–180 BPM, so the bridge must schedule its generated audio to the same changes rather than smoothing it independently.
 
 ## Cue mapping
 
 | Gameplay event | `MusicPlan` cue | Required bridge input |
 | --- | --- | --- |
 | Style contest | host snapshot `style_weights` | Blend the two style embeddings/conditioning weights smoothly over several generation frames. Re-evaluate on each plan revision rather than every rendered frame. |
-| Chord laser | `laser_charge_root`, `laser_chord`, `laser_charge_cancelled` | `laser_charge_root` starts and sustains the supplied root MIDI note. `laser_chord` expands it using `midi_notes`, `velocity`, `start_beat`, and `duration_beats`; use quality only for voicing/energy, not combat. `laser_charge_cancelled` must release the root immediately. |
+| Chord laser | `laser_charge_root`, `laser_chord`, `laser_charge_cancelled` | `laser_charge_root` starts and sustains the supplied root MIDI note for the host-provided one-beat charge duration. `laser_chord` expands it using `midi_notes`, `velocity`, `start_beat`, and `duration_beats`; use quality only for voicing/energy, not combat. `laser_charge_cancelled` must release the root immediately. |
 | Central control | `capture_started` | Increase drum conditioning/activity from `drum_density` gradually. The bridge chooses valid drum-condition syntax for the installed Magenta RT version. |
 | Melody ammunition | `melody_loaded`, `melody_note`, `melody_phrase_complete` | Only `melody_note` and phrase-complete need note scheduling: send their ordered `midi_notes`, velocity, start beat, and duration. Do not wait for projectile impact. |
 | Chaos core | `chaos_started` plus snapshot `temperature` | Smoothly move sampling temperature toward the bounded host value (currently 0.55–0.95); restore it when the host snapshot falls back. Never treat temperature as volume or BPM. |

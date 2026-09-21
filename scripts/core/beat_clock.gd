@@ -2,11 +2,11 @@ class_name BeatClock
 extends Node
 ## Monotonic rhythm clock. The authority may be a LAN host or a dedicated server.
 
-const MIN_BPM := 120.0
-const MAX_BPM := 136.0
-const MAX_BPM_STEP := 2.0
+const MIN_BPM := 80.0
+const MAX_BPM := 180.0
+const MAX_BPM_STEP := 6.0
 const BEATS_PER_BAR := 4.0
-const MIN_BEATS_BETWEEN_CHANGES := 16.0
+const MIN_SECONDS_BETWEEN_CHANGES := 10.0
 
 var bpm := 128.0
 var local_calibration_seconds := 0.0
@@ -55,13 +55,20 @@ func current_bpm() -> float:
 	return active_bpm
 
 func schedule_bpm_toward(target_bpm: float) -> Dictionary:
+	var current_time := rhythm_time_seconds()
 	var scheduled_bpm := current_bpm()
 	var current_beat := beat_position()
 	var last_segment: Dictionary = _tempo_segments[_tempo_segments.size() - 1]
-	var last_start_beat := float(last_segment["start_beat"])
+	if float(last_segment["start_time"]) > current_time:
+		return {}
+	scheduled_bpm = float(last_segment["bpm"])
 	var next_bar_beat := ceilf((current_beat + 0.001) / BEATS_PER_BAR) * BEATS_PER_BAR
-	var earliest_change_beat := last_start_beat + MIN_BEATS_BETWEEN_CHANGES
+	var earliest_change_time := current_time
+	if _tempo_segments.size() > 1:
+		earliest_change_time = maxf(current_time, float(last_segment["start_time"]) + MIN_SECONDS_BETWEEN_CHANGES)
+	var earliest_change_beat := rhythm_time_to_beat(earliest_change_time)
 	var start_beat := maxf(next_bar_beat, earliest_change_beat)
+	start_beat = ceilf((start_beat + 0.001) / BEATS_PER_BAR) * BEATS_PER_BAR
 	var next_bpm := move_toward(scheduled_bpm, clampf(target_bpm, MIN_BPM, MAX_BPM), MAX_BPM_STEP)
 	if is_equal_approx(next_bpm, scheduled_bpm):
 		return {}
@@ -78,6 +85,15 @@ func beat_to_rhythm_time(target_beat: float) -> float:
 		else:
 			break
 	return float(segment["start_time"]) + (target_beat - float(segment["start_beat"])) * 60.0 / float(segment["bpm"])
+
+func rhythm_time_to_beat(target_time: float) -> float:
+	var segment: Dictionary = _tempo_segments[0]
+	for candidate in _tempo_segments:
+		if target_time >= float(candidate["start_time"]):
+			segment = candidate
+		else:
+			break
+	return float(segment["start_beat"]) + (target_time - float(segment["start_time"])) * float(segment["bpm"]) / 60.0
 
 func tempo_segments() -> Array[Dictionary]:
 	return _tempo_segments.duplicate(true)
